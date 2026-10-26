@@ -1,0 +1,15 @@
+[Unit]
+Description=ARCHIVE_PROJET - alerte ntfy quand un passage de l'archiveur echoue
+# Au plus une alerte par heure, meme si les passages echouent toutes les 5 minutes
+StartLimitIntervalSec=3600
+StartLimitBurst=1
+
+[Service]
+Type=oneshot
+User=archiveur
+Group=archiveur
+ExecStart=/usr/bin/python3 /opt/archiveur/archiveur.py alerter --config /etc/archiveur/archiveur.conf --titre "passage en échec" --texte "Un passage de l archiveur a échoué. Rien n est modifié dans l archive ; nouvel essai toutes les 5 minutes. Détail : journalctl -u archiveur -n 50"
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes

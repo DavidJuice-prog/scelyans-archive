@@ -1,0 +1,19 @@
+# /etc/nostr-temoin/nostr.conf  (exemple ; ne contient aucun secret : la clé est dans un fichier à part, en 0600)
+[nostr]
+# Dossier de l'archive (les ADN sont dans <destination>/adn/)
+destination = /var/lib/archiveur
+journal = /var/lib/nostr-temoin/journal.jsonl
+# Fichier de clé secrète (64 caractères hexadécimaux), créé par « nostr_temoin.py cle-generer », propriétaire nostr, 0600
+cle = /etc/nostr-temoin/cle.hex
+# Clé PUBLIQUE (64 caractères hexadécimaux, affichée par « cle-generer »). Publiable. Deux usages :
+#  - « publier » refuse de tourner si elle ne correspond pas à la clé secrète du fichier ci-dessus ;
+#  - « verifier » n'a plus besoin de lire la clé secrète (utilisable aussi depuis un autre poste, sans la clé).
+pubkey =
+# Relais publics, tous en wss:// ; un jour est publié quand min_ok relais ont répondu OK
+relais = wss://relay.damus.io, wss://nos.lol, wss://relay.primal.net
+min_ok = 2
+# Type d'événement ordinaire (1000-9999), non remplaçable : à confirmer avant la première publication
+kind = 1778
+# Premier jour publié (AAAA-MM-JJ). VOLONTAIREMENT VIDE : tant qu'il est vide, rien n'est publié.
+debut =
+delai = 15

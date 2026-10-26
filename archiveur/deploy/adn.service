@@ -1,0 +1,24 @@
+[Unit]
+Description=ARCHIVE_PROJET - ADN Scelyans du jour (calcul et ancrage seulement, aucune publication)
+After=network-online.target
+# Un passage en échec déclenche l'alerte ntfy de l'archiveur (au plus une par heure)
+OnFailure=archiveur-alerte.service
+
+[Service]
+Type=oneshot
+User=archiveur
+Group=archiveur
+# Mêmes accès que l'archiveur : lecture des fichiers de TRACKYZZ par le groupe, écriture dans l'archive seulement
+SupplementaryGroups=trackyzz
+ExecStart=/usr/bin/python3 /opt/archiveur/adn.py executer --config /etc/archiveur/archiveur.conf
+# Client ots : son cache va dans /tmp privé, jamais dans l'archive
+Environment=HOME=/tmp
+ProtectSystem=strict
+ReadOnlyPaths=/var/lib/trackyzz
+ReadWritePaths=/var/lib/archiveur
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+UMask=0022
+Nice=10
+IOSchedulingClass=idle

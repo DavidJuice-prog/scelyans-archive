@@ -1,0 +1,9 @@
+[Unit]
+Description=ARCHIVE_PROJET - ADN Scelyans chaque heure à la 50e minute (1er essai 00:50 UTC, après l'empreinte de 00:40)
+
+[Timer]
+OnCalendar=*-*-* *:50:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

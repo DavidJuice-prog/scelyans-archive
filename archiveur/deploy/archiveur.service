@@ -1,0 +1,22 @@
+[Unit]
+Description=ARCHIVE_PROJET - fichiers horaires fermés depuis TRACKYZZ (lecture seule)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=archiveur
+Group=archiveur
+# Lecture des fichiers de TRACKYZZ par le groupe, sans ajouter durablement l'utilisateur au groupe
+SupplementaryGroups=trackyzz
+ExecStart=/usr/bin/python3 /opt/archiveur/archiveur.py executer --config /etc/archiveur/archiveur.conf
+# Garde-fous : tout le système en lecture seule, sauf le dossier de l'archive
+ProtectSystem=strict
+ReadOnlyPaths=/var/lib/trackyzz
+ReadWritePaths=/var/lib/archiveur
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+UMask=0022
+# Priorité basse : la collecte de TRACKYZZ passe toujours avant
+Nice=10
+IOSchedulingClass=idle

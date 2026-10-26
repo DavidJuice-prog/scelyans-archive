@@ -1,0 +1,15 @@
+[Unit]
+Description=ARCHIVE_PROJET - alerte ntfy quand le témoin Nostr échoue (quota d'une alerte par heure distinct de celui de l'archiveur)
+# Au plus une alerte par heure pour le témoin Nostr, sans consommer le quota des alertes de l'archiveur et de l'ADN
+StartLimitIntervalSec=3600
+StartLimitBurst=1
+
+[Service]
+Type=oneshot
+User=archiveur
+Group=archiveur
+ExecStart=/usr/bin/python3 /opt/archiveur/archiveur.py alerter --config /etc/archiveur/archiveur.conf --titre "témoin Nostr en échec" --texte "Le témoin Nostr n a pas pu publier un ADN scellé (relais injoignables ou refus). Le scellé et l ancrage de l archive ne sont pas touchés ; nouvel essai avec recul progressif. Détail : journalctl -u nostr -n 50"
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes

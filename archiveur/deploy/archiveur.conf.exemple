@@ -1,0 +1,21 @@
+[archiveur]
+# Dossier de TRACKYZZ, lu sans jamais y écrire
+source = /var/lib/trackyzz
+# Dossier de l'archive (heures, jours, preuves, racines, trous, incidents)
+destination = /var/lib/archiveur
+# Premier jour archivé (vide : premier fichier du registre de TRACKYZZ)
+debut =
+# Alerte ntfy en cas d'incident (facultatif ; adresse écrite ici seulement, jamais dans le code)
+ntfy_url =
+# Ancrage OpenTimestamps : chemin du client officiel « ots » (vide : pas d'ancrage Bitcoin)
+#   exemple après installation validée : /opt/archiveur/venv/bin/ots
+ots =
+# Ancrage RFC 3161 : adresse de l'autorité d'horodatage (vide : pas d'ancrage RFC 3161)
+#   exemple : https://freetsa.org/tsr  (gratuit)
+tsa_url =
+openssl = /usr/bin/openssl
+
+[adn]
+# Têtes du jour du registre de l'IA ASTRA-M, publiées par le PC (gène « astra ») ; route publique ou dossier.
+# Vide : gène « indisponible ». Renseigné : ADN attend la tête jusqu'à 9 h après minuit UTC, puis scelle sans elle.
+astra = https://trackyzz.com/astra/tetes

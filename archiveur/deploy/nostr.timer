@@ -1,0 +1,9 @@
+[Unit]
+Description=ARCHIVE_PROJET - témoin Nostr chaque heure à la 55e minute (après le passage de l'ADN à la 50e)
+
+[Timer]
+OnCalendar=*-*-* *:55:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

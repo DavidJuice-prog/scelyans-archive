@@ -1,0 +1,26 @@
+[Unit]
+Description=ARCHIVE_PROJET - témoin public Nostr (publie seulement jour et racine_du_jour des ADN scellés ; aucun prix)
+After=network-online.target
+# Un passage en échec déclenche une alerte ntfy propre au témoin (au plus une par heure, quota distinct de l'archiveur)
+OnFailure=nostr-alerte.service
+
+[Service]
+Type=oneshot
+User=nostr
+Group=nostr
+# Lecture des ADN scellés : /var/lib/archiveur est en 0750 archiveur:archiveur (vérifié), le dossier adn/ en 0755
+SupplementaryGroups=archiveur
+ExecStart=/usr/bin/python3 /opt/archiveur/nostr_temoin.py publier --config /etc/nostr-temoin/nostr.conf
+Environment=HOME=/tmp
+# Journal des publications : /var/lib/nostr-temoin, créé et réservé à l'utilisateur nostr
+StateDirectory=nostr-temoin
+ProtectSystem=strict
+ReadOnlyPaths=/var/lib/archiveur /etc/nostr-temoin
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+# AF_UNIX reste permis : la résolution de noms peut passer par un socket local (systemd-resolved)
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+Nice=10
+IOSchedulingClass=idle

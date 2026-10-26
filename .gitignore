@@ -1,0 +1,13 @@
+﻿# Tout est ignoré par défaut (clés, ntfy_url, prix, sauvegardes, exports)
+/*
+!/.gitignore
+!/archiveur/
+/archiveur/*
+!/archiveur/*.py
+!/archiveur/deploy/
+__pycache__/
+*.pyc
+*.hex
+*.key
+*.pem
+*ntfy*
