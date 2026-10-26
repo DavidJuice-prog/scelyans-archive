@@ -4,6 +4,7 @@
 !/archiveur/
 /archiveur/*
 !/archiveur/*.py
+!/archiveur/MERKLE.md
 !/archiveur/deploy/
 !/verifier-web/
 /verifier-web/*
