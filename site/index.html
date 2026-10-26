@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Scelyans — Horodatage et ancrage blockchain de vos documents</title>
+<meta name="description" content="Scelyans horodate et ancre vos documents dans la blockchain Bitcoin : une preuve d'antériorité vérifiable par tous, pour vos attestations crypto et vos documents professionnels.">
+<style>
+  :root {
+    --navy: #0d1b2a;
+    --navy-light: #15263b;
+    --gold: #c9a227;
+    --gold-light: #e4c966;
+    --cream: #f7f4ee;
+    --ink: #1c1c1c;
+    --grey: #5a6472;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    background: var(--cream);
+    line-height: 1.55;
+  }
+  h1, h2, h3, .serif {
+    font-family: Georgia, "Iowan Old Style", "Palatino Linotype", serif;
+    font-weight: normal;
+  }
+  a { color: inherit; text-decoration: none; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 32px; }
+
+  /* Header */
+  header {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--cream);
+    border-bottom: 1px solid rgba(0,0,0,0.08);
+  }
+  .nav-inner {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 20px 32px; max-width: 1120px; margin: 0 auto;
+  }
+  .logo { font-family: Georgia, serif; font-size: 22px; letter-spacing: 2px; font-weight: bold; }
+  .logo span { color: var(--gold); }
+  nav ul { display: flex; gap: 32px; list-style: none; }
+  nav a { font-size: 13px; letter-spacing: 1px; text-transform: uppercase; color: var(--navy); }
+  nav a:hover { color: var(--gold); }
+  .burger { display: none; font-size: 24px; background: none; border: none; cursor: pointer; }
+
+  /* Hero */
+  .hero {
+    background: linear-gradient(135deg, var(--navy) 0%, var(--navy-light) 55%, #1f3a5a 100%);
+    color: #fff;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: "";
+    position: absolute; inset: 0;
+    background-image:
+      radial-gradient(circle at 80% 20%, rgba(201,162,39,0.18), transparent 40%),
+      repeating-linear-gradient(135deg, rgba(255,255,255,0.025) 0 2px, transparent 2px 40px);
+    pointer-events: none;
+  }
+  .hero-inner {
+    position: relative;
+    max-width: 1120px; margin: 0 auto;
+    padding: 90px 32px 70px;
+    display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 50px; align-items: center;
+  }
+  .eyebrow {
+    font-size: 12px; letter-spacing: 3px; text-transform: uppercase;
+    color: var(--gold-light); margin-bottom: 20px;
+  }
+  .hero h1 { font-size: 44px; line-height: 1.2; margin-bottom: 10px; }
+  .hero .accent { color: var(--gold-light); font-style: italic; font-size: 30px; display: block; margin-top: 6px; }
+  .hero p.lead {
+    margin-top: 22px; font-size: 16.5px; color: #d8dee6; max-width: 46ch;
+  }
+  .cta-row { display: flex; gap: 14px; margin-top: 32px; flex-wrap: wrap; }
+  .btn {
+    display: inline-block; padding: 14px 26px; font-size: 13px; letter-spacing: 1px;
+    text-transform: uppercase; border-radius: 2px; cursor: pointer; border: 1px solid transparent;
+  }
+  .btn-gold { background: var(--gold); color: var(--navy); font-weight: 600; }
+  .btn-gold:hover { background: var(--gold-light); }
+  .btn-outline { background: transparent; border-color: rgba(255,255,255,0.4); color: #fff; }
+  .btn-outline:hover { border-color: #fff; }
+  .trust-row {
+    margin-top: 34px; display: flex; gap: 26px; flex-wrap: wrap;
+    font-size: 13px; color: #c4cdd8;
+  }
+  .trust-row span::before { content: "✓ "; color: var(--gold-light); }
+
+  /* hero visual : schéma d'ancrage abstrait, pas de photo */
+  .hero-visual {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 6px;
+    padding: 28px;
+  }
+  .chain {
+    display: flex; flex-direction: column; gap: 0;
+  }
+  .chain .step {
+    display: flex; align-items: center; gap: 14px;
+    padding: 14px 0;
+    border-bottom: 1px dashed rgba(255,255,255,0.14);
+    font-size: 13.5px; color: #e6e9ee;
+  }
+  .chain .step:last-child { border-bottom: none; }
+  .chain .dot {
+    width: 28px; height: 28px; min-width: 28px; border-radius: 50%;
+    background: rgba(201,162,39,0.15); border: 1px solid var(--gold);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; color: var(--gold-light); font-family: Georgia, serif;
+  }
+
+  /* Sections */
+  section { padding: 76px 0; }
+  .section-head { max-width: 640px; margin: 0 auto 46px; text-align: center; }
+  .section-head .eyebrow { color: var(--gold); }
+  .section-head h2 { font-size: 30px; color: var(--navy); }
+  .section-head p { color: var(--grey); margin-top: 12px; font-size: 15.5px; }
+
+  .audience-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 28px;
+  }
+  .audience-card {
+    background: #fff; border: 1px solid rgba(0,0,0,0.08); border-radius: 6px;
+    padding: 34px; border-top: 3px solid var(--gold);
+  }
+  .audience-card h3 { font-size: 20px; color: var(--navy); margin-bottom: 12px; }
+  .audience-card p { color: var(--grey); font-size: 14.5px; margin-bottom: 16px; }
+  .audience-card ul { list-style: none; font-size: 14px; color: var(--navy); }
+  .audience-card li { padding: 6px 0; }
+  .audience-card li::before { content: "— "; color: var(--gold); }
+  .audience-card .note {
+    margin-top: 16px; font-size: 12.5px; color: var(--grey); font-style: italic;
+    border-top: 1px solid rgba(0,0,0,0.06); padding-top: 12px;
+  }
+
+  .how { background: var(--navy-light); color: #fff; }
+  .how .section-head h2 { color: #fff; }
+  .how .section-head p { color: #c4cdd8; }
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; }
+  .step-card { text-align: left; }
+  .step-num {
+    font-family: Georgia, serif; font-size: 34px; color: var(--gold-light); margin-bottom: 10px;
+  }
+  .step-card h3 { font-size: 17px; margin-bottom: 8px; }
+  .step-card p { font-size: 14px; color: #c4cdd8; }
+
+  .verify-band {
+    background: var(--cream);
+    border: 1px solid rgba(0,0,0,0.08);
+    border-radius: 6px;
+    padding: 40px;
+    display: flex; align-items: center; justify-content: space-between; gap: 24px;
+    flex-wrap: wrap;
+  }
+  .verify-band h3 { font-size: 20px; color: var(--navy); margin-bottom: 6px; }
+  .verify-band p { color: var(--grey); font-size: 14.5px; max-width: 46ch; }
+
+  footer {
+    background: var(--navy); color: #aab4c0; font-size: 13px; padding: 46px 0 30px;
+  }
+  footer .wrap { display: flex; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+  footer a { color: #d8dee6; }
+  footer a:hover { color: var(--gold-light); }
+  footer .cols { display: flex; gap: 60px; flex-wrap: wrap; }
+  footer h4 { font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; color: #fff; margin-bottom: 12px; }
+  footer ul { list-style: none; }
+  footer li { padding: 4px 0; }
+  .fine-print {
+    max-width: 1120px; margin: 34px auto 0; padding: 20px 32px 0; border-top: 1px solid rgba(255,255,255,0.08);
+    font-size: 12px; color: #7c8795;
+  }
+
+  @media (max-width: 860px) {
+    nav ul { display: none; }
+    .burger { display: block; }
+    .hero-inner { grid-template-columns: 1fr; padding-top: 60px; }
+    .hero h1 { font-size: 32px; }
+    .audience-grid, .steps { grid-template-columns: 1fr; }
+    footer .wrap { flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="nav-inner">
+    <div class="logo">SCELY<span>AN</span>S</div>
+    <nav>
+      <ul>
+        <li><a href="#professionnels">Professionnels</a></li>
+        <li><a href="#particuliers">Particuliers</a></li>
+        <li><a href="/verifier/">Vérificateur</a></li>
+        <li><a href="#conformite">Conformité</a></li>
+        <li><a href="#faq">FAQ</a></li>
+      </ul>
+    </nav>
+    <button class="burger" aria-label="Menu">☰</button>
+  </div>
+</header>
+
+<div class="hero">
+  <div class="hero-inner">
+    <div>
+      <div class="eyebrow">EXPERTS-COMPTABLES · AVOCATS · NOTAIRES · PARTICULIERS</div>
+      <h1>Vos documents, horodatés.
+        <span class="accent">Une preuve que personne ne peut falsifier.</span>
+      </h1>
+      <p class="lead">
+        Déposez un acte, un projet de contrat ou une pièce de dossier : Scelyans
+        l'horodate et l'ancre publiquement dans la blockchain Bitcoin. Vous obtenez
+        une preuve d'antériorité vérifiable par n'importe qui, indépendamment de nous
+        — utile aussi pour attester l'état d'un portefeuille crypto à une date donnée.
+      </p>
+      <div class="cta-row">
+        <a href="#particuliers" class="btn btn-gold">Horodater un document</a>
+        <a href="/verifier/" class="btn btn-outline">Vérifier une attestation</a>
+      </div>
+      <div class="trust-row">
+        <span>Ancrage Bitcoin public</span>
+        <span>Vérification indépendante en ligne</span>
+        <span>Aucun compte requis pour vérifier</span>
+      </div>
+    </div>
+    <div class="hero-visual">
+      <div class="chain">
+        <div class="step"><div class="dot">1</div> Vous déposez votre document ou votre relevé de portefeuille</div>
+        <div class="step"><div class="dot">2</div> Scelyans calcule son empreinte et l'horodate</div>
+        <div class="step"><div class="dot">3</div> L'empreinte est ancrée dans la blockchain Bitcoin</div>
+        <div class="step"><div class="dot">4</div> Vous recevez une attestation vérifiable par tous</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<section id="solutions">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="eyebrow serif">POUR VOUS</div>
+      <h2>Professionnels &amp; particuliers</h2>
+      <p>Deux usages, une même preuve : savoir, de façon vérifiable, qu'un document existait tel quel à une date donnée.</p>
+    </div>
+    <div class="audience-grid">
+      <div class="audience-card" id="professionnels">
+        <h3>Experts-comptables, avocats, notaires</h3>
+        <p>Datez et archivez vos actes, dossiers et pièces sensibles avec une preuve d'antériorité opposable.</p>
+        <ul>
+          <li>Horodatage d'un acte, d'un projet de contrat ou d'une pièce de dossier</li>
+          <li>Preuve indépendante, vérifiable par votre client ou en cas de litige</li>
+          <li>Aucune donnée en clair publiée : seule une empreinte est ancrée</li>
+        </ul>
+        <p class="note">
+          Scelyans atteste une date et une empreinte, pas le contenu juridique du document.
+          Elle ne remplace pas un acte authentique ni un conseil professionnel.
+        </p>
+      </div>
+      <div class="audience-card" id="particuliers">
+        <h3>Particuliers — portefeuilles crypto</h3>
+        <p>Générez une attestation horodatée de l'état de votre portefeuille à une date précise.</p>
+        <ul>
+          <li>Pièce justificative à conserver avec votre déclaration de plus-values</li>
+          <li>Utile en cas de demande de votre centre des impôts</li>
+          <li>Preuve datée, vérifiable indépendamment de Scelyans</li>
+        </ul>
+        <p class="note">
+          Scelyans fournit une preuve d'horodatage, pas un service de déclaration fiscale.
+          Le calcul de vos plus-values (formulaire 2086) et le dépôt de votre déclaration
+          restent de votre responsabilité ou de celle de votre expert-comptable.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="how">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="eyebrow">COMMENT ÇA MARCHE</div>
+      <h2>Trois étapes, une preuve publique</h2>
+      <p>Aucun compte, aucune dépendance à Scelyans pour vérifier a posteriori.</p>
+    </div>
+    <div class="steps">
+      <div class="step-card">
+        <div class="step-num">01</div>
+        <h3>Déposez</h3>
+        <p>Votre document ou votre relevé reste privé : seule son empreinte numérique est calculée, jamais le contenu.</p>
+      </div>
+      <div class="step-card">
+        <div class="step-num">02</div>
+        <h3>Ancrez</h3>
+        <p>L'empreinte est horodatée et ancrée dans la blockchain Bitcoin, un registre public que personne ne contrôle seul.</p>
+      </div>
+      <div class="step-card">
+        <div class="step-num">03</div>
+        <h3>Vérifiez</h3>
+        <p>À tout moment, vous ou un tiers pouvez vérifier la preuve depuis <a href="/verifier/" style="color:#e4c966; text-decoration:underline;">scelyans.com/verifier</a>, sans dépendre de Scelyans.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="verify-band">
+      <div>
+        <h3>Déjà une attestation Scelyans ?</h3>
+        <p>Vérifiez-la indépendamment, directement depuis votre navigateur.</p>
+      </div>
+      <a href="/verifier/" class="btn btn-gold" style="color:#0d1b2a;">Ouvrir le vérificateur</a>
+    </div>
+  </div>
+</section>
+
+<footer id="conformite">
+  <div class="wrap">
+    <div class="cols">
+      <div>
+        <h4>Scelyans</h4>
+        <ul>
+          <li><a href="#professionnels">Professionnels</a></li>
+          <li><a href="#particuliers">Particuliers</a></li>
+          <li><a href="/verifier/">Vérificateur</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Informations</h4>
+        <ul>
+          <li><a href="#conformite" id="faq">Conformité</a></li>
+          <li><a href="#faq">FAQ</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Éditeur</h4>
+        <ul>
+          <li>Lumiadom (entreprise individuelle)</li>
+          <li><!-- SIRET à compléter --></li>
+          <li><!-- adresse à compléter --></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="fine-print wrap">
+    Scelyans est un service d'horodatage et de preuve d'antériorité par ancrage blockchain.
+    Il ne constitue ni un conseil fiscal, ni un conseil juridique, ni un acte authentique.
+    Pour toute question relative à votre situation fiscale ou juridique, consultez un professionnel habilité.
+  </div>
+</footer>
+
+</body>
+</html>

@@ -17,3 +17,5 @@ __pycache__/
 *.pem
 *ntfy*
 !/LICENSE
+!/verifier-web/*.conf
+!/site/
