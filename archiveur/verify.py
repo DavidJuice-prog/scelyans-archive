@@ -41,11 +41,11 @@ Ce que ce script vérifie, et comment :
    déclaration de TRACKYZZ.
 
 4. Gène code (intégrité du logiciel)
-   Si les empreintes publiques d'adn.py et archiveur.py sont connues
-   (par exemple publiées sur un dépôt GitHub public), ce script peut
-   les comparer à celles déclarées dans le maillon. Pour l'instant,
-   cette étape affiche l'empreinte déclarée pour vérification manuelle,
-   en attendant que l'URL du dépôt soit renseignée ci-dessous.
+   Compare les empreintes SHA-256 d'adn.py et d'archiveur.py déclarées dans le
+   maillon à toutes les versions publiées dans l'historique du dépôt public
+   (CODE_REPO_URL). Une version antérieure à la publication du dépôt n'y figure
+   pas : ce cas est signalé en ATTENTION (à vérifier à la main), jamais en
+   ECHEC, car l'absence d'un fichier dans l'historique ne prouve pas une falsification.
 
 5. Continuité de la chaîne (si le maillon de la veille est fourni)
    Vérifie que racine_veille correspond bien à la racine du jour
@@ -65,6 +65,7 @@ import sys
 import os
 import json
 import hashlib
+import re
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
@@ -75,7 +76,7 @@ from datetime import datetime, timezone
 
 # URL du dépôt public où sont publiés adn.py / archiveur.py, pour recouper
 # les empreintes du gène "code". Laisser vide tant que non disponible.
-CODE_REPO_URL = ""  # ex: "https://github.com/DavidJuice-prog/scelyans-archive"
+CODE_REPO_URL = "https://github.com/DavidJuice-prog/scelyans-archive"
 
 # Nœud Bitcoin personnel (une fois synchronisé) : "host:port" RPC, ou None.
 LOCAL_NODE_RPC = None
@@ -305,21 +306,59 @@ def verifier_continuite(d, maillon_veille_path):
         return False
 
 
+def sha256_url(url, timeout=20):
+    req = urllib.request.Request(url, headers={"User-Agent": "scelyans-verify/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return hashlib.sha256(resp.read()).hexdigest()
+
+
+def versions_publiees(depot, chemin):
+    """{sha256: commit} de toutes les versions de `chemin` dans l'historique du dépôt GitHub public.
+    Les fichiers sont comparés tels qu'enregistrés dans le dépôt (fins de ligne LF)."""
+    m = re.fullmatch(r"https://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?", depot)
+    if not m:
+        raise ValueError("CODE_REPO_URL doit ressembler à https://github.com/PROPRIETAIRE/DEPOT")
+    proprio, nom = m.group(1), m.group(2)
+    api = f"https://api.github.com/repos/{proprio}/{nom}/commits?path={chemin}&per_page=100"
+    commits = json.loads(http_get_json(api))
+    out = {}
+    for c in reversed(commits):                       # du plus ancien au plus récent : le commit d'origine l'emporte
+        out.setdefault(sha256_url(f"https://raw.githubusercontent.com/{proprio}/{nom}/{c['sha']}/{chemin}"), c["sha"])
+    return out
+
+
 def verifier_gene_code(d):
     section("4. Gène code (intégrité du logiciel)")
     code = d.get("genes", {}).get("code")
     if not code:
         warn("aucun gène code dans ce maillon, étape sautée")
         return None
-    info(f"empreintes déclarées : {code}")
+    declarees = {"adn.py": code.get("adn_py_sha256"), "archiveur.py": code.get("archiveur_py_sha256")}
+    for nom, sha in declarees.items():
+        info(f"{nom} déclaré : {sha}")
     if not CODE_REPO_URL:
-        warn("URL du dépôt public non configurée (CODE_REPO_URL) — "
-             "comparaison automatique impossible pour l'instant. "
-             "Vérification manuelle recommandée en attendant.")
+        warn("URL du dépôt public non configurée (CODE_REPO_URL) — comparaison automatique impossible.")
         return None
-    # TODO : une fois CODE_REPO_URL renseignée, télécharger adn.py / archiveur.py
-    # depuis le dépôt public, recalculer leur sha256, et comparer.
-    return None
+    tout_ok = True
+    for nom, sha in declarees.items():
+        if not sha:
+            warn(f"{nom} : empreinte absente du gène code")
+            tout_ok = False
+            continue
+        try:
+            publiees = versions_publiees(CODE_REPO_URL, "archiveur/" + nom)
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError, KeyError) as e:
+            warn(f"{nom} : dépôt public injoignable ({e})")
+            tout_ok = False
+            continue
+        commit = publiees.get(str(sha).lower())
+        if commit:
+            ok(f"{nom} {str(sha)[:12]}… correspond à la version publiée au commit {commit[:7]}")
+        else:
+            warn(f"{nom} {str(sha)[:12]}… ne correspond à aucune des {len(publiees)} version(s) publiée(s) — "
+                 "version antérieure à la publication du dépôt, ou fichier différent : à vérifier à la main")
+            tout_ok = False
+    return True if tout_ok else None
 
 
 def main():
