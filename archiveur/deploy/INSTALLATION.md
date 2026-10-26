@@ -3,10 +3,10 @@
 Rien de ce fichier n'a été exécuté. Aucune commande ne touche aux fichiers, à la configuration ni aux services de
 TRACKYZZ : l'archiveur lit `/var/lib/trackyzz` et n'écrit que dans `/var/lib/archiveur`.
 
-## 1. Copier les fichiers (depuis le PC, PowerShell)
+## 1. Copier les fichiers (depuis le PC, PowerShell, à la racine du dépôt)
 
 ```powershell
-scp C:\Users\lumia\ARCHIVE_PROJET\archiveur\archiveur.py C:\Users\lumia\ARCHIVE_PROJET\archiveur\deploy\archiveur.service C:\Users\lumia\ARCHIVE_PROJET\archiveur\deploy\archiveur.timer C:\Users\lumia\ARCHIVE_PROJET\archiveur\deploy\archiveur.conf.exemple trackyzz:~/
+scp archiveur\archiveur.py archiveur\deploy\archiveur.service archiveur\deploy\archiveur.timer archiveur\deploy\archiveur.conf.exemple trackyzz:~/
 ```
 
 ## 2. Installer (sur le serveur)

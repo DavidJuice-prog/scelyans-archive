@@ -75,7 +75,7 @@ from datetime import datetime, timezone
 
 # URL du dépôt public où sont publiés adn.py / archiveur.py, pour recouper
 # les empreintes du gène "code". Laisser vide tant que non disponible.
-CODE_REPO_URL = ""  # ex: "https://github.com/trackyzz/adn"
+CODE_REPO_URL = ""  # ex: "https://github.com/DavidJuice-prog/scelyans-archive"
 
 # Nœud Bitcoin personnel (une fois synchronisé) : "host:port" RPC, ou None.
 LOCAL_NODE_RPC = None
