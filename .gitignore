@@ -5,6 +5,10 @@
 /archiveur/*
 !/archiveur/*.py
 !/archiveur/deploy/
+!/verifier-web/
+/verifier-web/*
+!/verifier-web/app.py
+!/verifier-web/requirements.txt
 __pycache__/
 *.pyc
 *.hex
