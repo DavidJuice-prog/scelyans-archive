@@ -131,6 +131,36 @@ class MaillonsReels(unittest.TestCase):
         self.assertIn("premier maillon de la chaîne", out)
 
 
+class GeneBloc(unittest.TestCase):
+    D = {"genes": {"bloc": {"statut": "mesure", "hauteur": 1, "hash": "bb" * 32}}}
+
+    def statut(self, http):
+        with unittest.mock.patch.object(verify, "http_get_json", http), contextlib.redirect_stdout(io.StringIO()) as s:
+            r = verify.verifier_gene_bloc(self.D)
+        return r, s.getvalue()
+
+    def test_hors_ligne_attention_pas_echec(self):
+        def rien(url, timeout=10):
+            raise urllib.error.URLError("hors ligne (test)")
+        r, out = self.statut(rien)
+        self.assertIsNone(r)
+        self.assertIn("aucune source joignable", out)
+        self.assertNotIn("[ECHEC]", out)
+
+    def test_hash_different_reste_un_echec(self):
+        r, out = self.statut(lambda url, timeout=10: "cc" * 32)
+        self.assertIs(r, False)
+        self.assertIn("renvoie un hash différent", out)
+        def un_faux_un_muet(url, timeout=10):               # une source contredit, l'autre ne répond pas
+            if "mempool" in url:
+                return "cc" * 32
+            raise urllib.error.URLError("hors ligne (test)")
+        self.assertIs(self.statut(un_faux_un_muet)[0], False)
+
+    def test_deux_sources_confirment(self):
+        self.assertIs(self.statut(lambda url, timeout=10: "bb" * 32)[0], True)
+
+
 class GeneTours(unittest.TestCase):
     BASE = {"statut": "mesure", "source": "releves scelles du jour", "seuil_retard_s": 180,
             "minutes_sans_bloc": 3, "plages_sans_bloc": ["09:08-09:09", "13:00"],

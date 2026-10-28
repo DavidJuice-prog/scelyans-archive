@@ -224,6 +224,7 @@ def verifier_gene_bloc(d):
     info(f"horodatage déclaré : {horodatage_declare}")
 
     accords = 0
+    desaccords = 0
     total_sources = 0
     for nom, url_template in BLOCK_SOURCES:
         total_sources += 1
@@ -235,6 +236,7 @@ def verifier_gene_bloc(d):
                 accords += 1
             elif hash_declare:
                 fail(f"{nom} renvoie un hash différent pour le bloc {hauteur} : {resultat}")
+                desaccords += 1
             else:
                 info(f"{nom} renvoie {resultat} pour le bloc {hauteur} (pas de hash déclaré à comparer)")
                 accords += 1
@@ -251,6 +253,9 @@ def verifier_gene_bloc(d):
         return True
     elif accords > 0:
         warn(f"seulement {accords}/{total_sources} source(s) ont confirmé — vérification partielle")
+        return None
+    elif desaccords == 0:                               # aucune réponse (hors ligne) : rien ne contredit le maillon
+        warn("aucune source joignable (connexion internet ?) — bloc non vérifiable ici")
         return None
     else:
         fail("aucune source indépendante n'a pu confirmer ce bloc")
