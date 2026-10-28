@@ -24,7 +24,11 @@ Feuilles du jour J, dans cet ordre (RFC 9162 : feuille = SHA-256(0x00 || donnée
 Fichiers créés une seule fois, jamais réécrits :
   adn/adn-AAAA-MM-JJ.json            racine, racine de la veille, nombre de feuilles par type, méthode ; aucun prix,
                                      aucune donnée personnelle : c'est le seul fichier destiné à être publié ;
-  adn/adn-AAAA-MM-JJ.json.ots        preuve OpenTimestamps, puis .bitcoin.ots une fois confirmée par Bitcoin.
+  adn/adn-AAAA-MM-JJ.json.ots        preuve OpenTimestamps, puis .bitcoin.ots une fois confirmée par Bitcoin ;
+  adn/feuilles-AAAA-MM-JJ.txt.gz     empreintes SHA-256 de toutes les feuilles du jour, dans l'ordre (« <position>
+                                     <type> <empreinte> », type releve suivi de l'heure UTC d'écriture) : un tiers
+                                     recalcule la racine sans aucun relevé ni prix (commande « verifier-feuilles »).
+                                     Créé seulement s'il redonne exactement la racine de l'ADN ; publiable.
 Une preuve d'inclusion (commande « preuve ») contient le relevé lui-même, donc des prix : elle n'est jamais publiée,
 seulement remise à qui en a besoin.
 
@@ -32,6 +36,7 @@ seulement remise à qui en a besoin.
     python3 adn.py verifier        --config /etc/archiveur/archiveur.conf
     python3 adn.py preuve          --config /etc/archiveur/archiveur.conf --jour 2026-10-15 --index 123456 [--sortie f]
     python3 adn.py verifier-preuve --preuve preuve.json --adn adn-2026-10-15.json
+    python3 adn.py verifier-feuilles --feuilles feuilles-2026-10-15.txt.gz --adn adn-2026-10-15.json [--empreinte 2026-10-15.txt]
 """
 import argparse, configparser, gzip, json, re, subprocess, sys, time, urllib.error, urllib.request
 from pathlib import Path
@@ -41,6 +46,8 @@ import archiveur as ar
 METHODE = "adn/1"
 FORMAT_ADN = "adn-scelyans-jour/1"
 FORMAT_PREUVE = "adn-scelyans-preuve-releve/1"
+FORMAT_FEUILLES = "adn-scelyans-feuilles/1"
+LIGNE_FEUILLE = re.compile(r"(\d+) (veille|empreinte|releve [0-2]\d|incident|gene [a-z]+) ([0-9a-f]{64})")
 ALGORITHME = "RFC 9162 SHA-256 (feuille 0x00 || donnees, noeud 0x01 || gauche || droite)"
 P_VEILLE, P_EMPREINTE, P_RELEVE, P_INCIDENT = (b"adn/1 veille ", b"adn/1 empreinte\n", b"adn/1 releve\n",
                                                b"adn/1 incident\n")
@@ -55,6 +62,7 @@ ATTENTE_EMPREINTE_S = 6 * 3600   # empreinte TRACKYZZ du jour toujours absente 6
 ATTENTE_ASTRA_S = 9 * 3600       # tête ASTRA publiée par le PC à 08:05 Paris : au-delà de 9 h, scellé sans elle
 ar.LIBELLES.setdefault("adn_empreinte_absente", "ADN : empreinte TRACKYZZ du jour absente")
 ar.LIBELLES.setdefault("adn_verification_en_echec", "ADN : vérification en échec")
+ar.LIBELLES.setdefault("adn_feuilles_incoherentes", "ADN : empreintes des feuilles ne redonnent pas la racine")
 
 
 def lire_config(path):
@@ -71,6 +79,10 @@ def lire_config(path):
 
 def fichier_adn(dest, jour_str):
     return dest / "adn" / f"adn-{jour_str}.json"
+
+
+def fichier_feuilles(dest, jour_str):
+    return dest / "adn" / f"feuilles-{jour_str}.txt.gz"
 
 
 def veille_de(jour_str):
@@ -404,8 +416,75 @@ def executer(conf, now_s=None, horo=None, genes=None):
                 ar.creer_une_fois(p, contenu_adn(conf, j, veille, *r, g), journal)
                 construits.append(j)
             j_s += 86400
-    return {"adn_construits": construits, "ancrage": ancrer(dest, now_s, horo, journal),
-            "incidents": [i["type"] for i in journal.incidents]}
+    return {"adn_construits": construits, "feuilles_publiees": ecrire_feuilles(conf, journal),
+            "ancrage": ancrer(dest, now_s, horo, journal), "incidents": [i["type"] for i in journal.incidents]}
+
+
+def texte_feuilles(conf, a):
+    """Empreintes des feuilles de l'ADN `a`, dans l'ordre (en-tête : format, jour, racine, total). None si l'archive du
+    jour manque ou si elles ne redonnent pas exactement la racine scellée : jamais de fichier faux."""
+    r = construire_feuilles(conf, a["jour"], a["racine_veille"], a.get("genes"))
+    if r is None:
+        return None
+    feuilles, detail = r
+    if ar.racine_merkle(feuilles).hex() != a["racine"] or len(feuilles) != a["feuilles"]["total"]:
+        return None
+    types = ["veille", "empreinte"] + [f"releve {json.loads(l)['collecte'][11:13]}" for l in detail["releves_lignes"]]
+    types += ["incident"] * detail["incidents"] + [f"gene {n}" for n in noms_genes(a.get("genes") or {})]
+    lignes = [FORMAT_FEUILLES, f"jour {a['jour']}", f"racine {a['racine']}", f"feuilles {len(feuilles)}"]
+    lignes += [f"{k} {t} {f.hex()}" for k, (t, f) in enumerate(zip(types, feuilles))]
+    return ("\n".join(lignes) + "\n").encode("ascii")
+
+
+def ecrire_feuilles(conf, journal):
+    """Pour chaque ADN scellé (anciens compris) : crée une fois adn/feuilles-J.txt.gz (gzip reproductible, mtime 0)."""
+    dest, ecrits = conf["destination"], []
+    for p in sorted((dest / "adn").glob("adn-????-??-??.json")):
+        a = json.loads(p.read_text(encoding="utf-8"))
+        f = fichier_feuilles(dest, a["jour"])
+        if f.exists():
+            continue
+        t = texte_feuilles(conf, a)
+        if t is None:
+            if (dest / "racines" / f"{a['jour']}.txt").exists():
+                journal.incident_une_fois("adn_feuilles_incoherentes", jour=a["jour"])
+            continue
+        ar.creer_une_fois(f, gzip.compress(t, mtime=0), journal)
+        ecrits.append(a["jour"])
+    return ecrits
+
+
+def verifier_feuilles(texte, a, empreinte=None):
+    """Vérification par un tiers, avec les seuls fichiers publiés : recalcule la racine depuis les empreintes des
+    feuilles, et recalcule lui-même les feuilles qu'il peut (veille, gènes, empreinte TRACKYZZ si fournie).
+    Renvoie la liste des problèmes (vide : la racine du jour est retrouvée)."""
+    pb = []
+    lignes = texte.decode("ascii").splitlines()
+    tete = [FORMAT_FEUILLES, f"jour {a['jour']}", f"racine {a['racine']}", f"feuilles {a['feuilles']['total']}"]
+    if lignes[:4] != tete:
+        return ["en-tête différent de l'ADN (format, jour, racine ou nombre de feuilles)"]
+    feuilles, types = [], []
+    for k, l in enumerate(lignes[4:]):
+        m = LIGNE_FEUILLE.fullmatch(l)
+        if not m or int(m.group(1)) != k:
+            return [f"ligne {k + 5} illisible ou hors d'ordre"]
+        types.append(m.group(2))
+        feuilles.append(bytes.fromhex(m.group(3)))
+    attendu = (["veille", "empreinte"] + ["releve"] * a["feuilles"]["releves"] + ["incident"] * a["feuilles"]["incidents"]
+               + [f"gene {n}" for n in noms_genes(a.get("genes") or {})])
+    if [t[:6] if t.startswith("releve") else t for t in types] != attendu:
+        pb.append("types de feuilles différents des comptes de l'ADN")
+    if feuilles and feuilles[0] != ar.feuille(P_VEILLE + (a["racine_veille"] or "aucune").encode() + b"\n"):
+        pb.append("feuille veille différente de racine_veille")
+    if empreinte is not None and len(feuilles) > 1 and feuilles[1] != ar.feuille(P_EMPREINTE + empreinte):
+        pb.append("feuille empreinte différente du fichier d'empreinte TRACKYZZ fourni")
+    genes = a.get("genes") or {}
+    for t, f in zip(types, feuilles):
+        if t.startswith("gene ") and t[5:] in genes and f != feuilles_genes({t[5:]: genes[t[5:]]})[0]:
+            pb.append(f"feuille {t} différente de la valeur publiée dans l'ADN")
+    if not feuilles or ar.racine_merkle(feuilles).hex() != a["racine"]:
+        pb.append("racine recalculée différente de la racine de l'ADN")
+    return pb
 
 
 def ancrer(dest, now_s, horo, journal):
@@ -459,6 +538,9 @@ def verifier(conf):
         elif (g and g.get("tours", {}).get("statut") == "mesure"         # « indisponible » n'affirme rien
               and g["tours"] != gene_tours(conf, j, r[1]["releves_lignes"])):
             problemes.append(f"{p.name} : gène tours différent du recalcul depuis les relevés")
+        elif fichier_feuilles(dest, j).exists() and (gzip.decompress(fichier_feuilles(dest, j).read_bytes())
+                                                      != texte_feuilles(conf, a)):
+            problemes.append(f"{fichier_feuilles(dest, j).name} : différent des feuilles recalculées")
         precedent = a
     return n, problemes
 
@@ -496,14 +578,27 @@ def verifier_preuve(pr, adn):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="ADN Scelyans v1 (lecture seule de TRACKYZZ et de l'archive)")
-    ap.add_argument("commande", choices=["executer", "verifier", "preuve", "verifier-preuve"])
+    ap.add_argument("commande", choices=["executer", "verifier", "preuve", "verifier-preuve", "verifier-feuilles"])
     ap.add_argument("--config")
     ap.add_argument("--jour")
     ap.add_argument("--index", type=int)
     ap.add_argument("--sortie")
     ap.add_argument("--preuve")
     ap.add_argument("--adn")
+    ap.add_argument("--feuilles")
+    ap.add_argument("--empreinte")
     a = ap.parse_args(argv)
+    if a.commande == "verifier-feuilles":
+        if not (a.feuilles and a.adn):
+            ap.error("--feuilles et --adn sont obligatoires")
+        b = Path(a.feuilles).read_bytes()
+        pb = verifier_feuilles(gzip.decompress(b) if b[:2] == b"\x1f\x8b" else b,
+                               json.loads(Path(a.adn).read_text(encoding="utf-8")),
+                               Path(a.empreinte).read_bytes() if a.empreinte else None)
+        for x in pb:
+            print(x)
+        print("racine retrouvée depuis les feuilles" if not pb else "FEUILLES INVALIDES")
+        return 0 if not pb else 1
     if a.commande == "verifier-preuve":
         if not (a.preuve and a.adn):
             ap.error("--preuve et --adn sont obligatoires")

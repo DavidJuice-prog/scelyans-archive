@@ -212,7 +212,8 @@ class TestADN(unittest.TestCase):
         adn.executer(self.conf, now_s=a_50, horo=h)            # .ots créés, complément tenté mais pas encore confirmé
         d = self.dest / "adn"
         avant = {p.name: (p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_mode) for p in d.iterdir()}
-        self.assertEqual(sorted(avant), [f"adn-{J1}.json", f"adn-{J1}.json.ots", f"adn-{J2}.json", f"adn-{J2}.json.ots"])
+        self.assertEqual(sorted(avant), [f"adn-{J1}.json", f"adn-{J1}.json.ots", f"adn-{J2}.json", f"adn-{J2}.json.ots",
+                                         f"feuilles-{J1}.txt.gz", f"feuilles-{J2}.txt.gz"])
         self.assertTrue(all(cmd[-1] not in (str(d / n) for n in avant) for cmd in vus))   # jamais les vrais fichiers
         self.assertIn("upgrade", [c[1] for c in vus])           # le complément a bien été tenté à hh:50
         bitcoin_a_confirme[0] = True
@@ -551,6 +552,106 @@ class TestGenesDansADN(TestADN):
         fin = self.jours(J1, empreinte=False)
         adn.executer(self.conf, now_s=fin, horo=FauxHorodateurs(), genes=lambda *a: appels.append(a))
         self.assertEqual(appels, [])
+
+
+def racine_depuis_empreintes(h):
+    """Racine RFC 9162 depuis les empreintes de feuilles déjà calculées, écrite sans le code de l'archiveur."""
+    if len(h) == 1:
+        return h[0]
+    k = 1 << ((len(h) - 1).bit_length() - 1)
+    return hashlib.sha256(b"\x01" + racine_depuis_empreintes(h[:k]) + racine_depuis_empreintes(h[k:])).digest()
+
+
+class TestFeuillesPubliees(TestADN):
+    def sceller(self, *jours):
+        fin = self.jours(*jours)
+        r = adn.executer(self.conf, now_s=fin, horo=FauxHorodateurs())
+        return r
+
+    def texte(self, j):
+        return gzip.decompress(adn.fichier_feuilles(self.dest, j).read_bytes())
+
+    def test_un_tiers_retrouve_la_racine_avec_les_seuls_fichiers_publies(self):
+        r = self.sceller(J1, J2)
+        self.assertEqual(r["feuilles_publiees"], [J1, J2])
+        for j in (J1, J2):
+            a, t = self.lire(j), self.texte(j)
+            emp = (self.src.d / "empreintes" / f"{j}.txt").read_bytes()
+            self.assertEqual(adn.verifier_feuilles(t, a, emp), [])
+            lignes = t.decode("ascii").splitlines()
+            self.assertEqual(len(lignes), 4 + a["feuilles"]["total"])
+            h = [bytes.fromhex(l.rsplit(" ", 1)[1]) for l in lignes[4:]]
+            self.assertEqual(racine_depuis_empreintes(h).hex(), a["racine"])       # calcul indépendant
+            self.assertEqual(sum(l.split()[1] == "releve" for l in lignes[4:]), a["feuilles"]["releves"])
+            self.assertEqual(adn.fichier_feuilles(self.dest, j).read_bytes(), gzip.compress(t, mtime=0))   # reproductible
+        self.assertEqual(adn.verifier(self.conf), (2, []))
+
+    def test_aucun_releve_ni_prix_dans_le_fichier(self):
+        self.sceller(J1)
+        t = self.texte(J1).decode("ascii")
+        for l in t.splitlines()[4:]:
+            self.assertRegex(l, adn.LIGNE_FEUILLE)
+        for mot in ("collecte", "prev_hash", "VERIFIED", "kraken", "prix", "mediane", "observations", "@", "{"):
+            self.assertNotIn(mot, t)
+        self.assertIn(" releve 00 ", t)
+        self.assertIn(" releve 23 ", t)
+
+    def test_alterations_detectees_par_le_tiers(self):
+        self.sceller(J1)
+        a, t = self.lire(J1), self.texte(J1).decode("ascii")
+        lignes = t.splitlines()
+        k = 10
+        h = lignes[k].rsplit(" ", 1)[1]
+        faux = lignes[:k] + [lignes[k][:-64] + ("0" if h[0] != "0" else "1") + h[1:]] + lignes[k + 1:]
+        self.assertIn("racine recalculée différente de la racine de l'ADN",
+                      adn.verifier_feuilles(("\n".join(faux) + "\n").encode(), a))
+        inverse = lignes[:k] + [lignes[k + 1], lignes[k]] + lignes[k + 2:]
+        self.assertEqual(adn.verifier_feuilles(("\n".join(inverse) + "\n").encode(), a), [f"ligne {k + 1} illisible ou hors d'ordre"])
+        self.assertIn("feuille empreinte différente du fichier d'empreinte TRACKYZZ fourni",
+                      adn.verifier_feuilles(t.encode(), a, b"autre empreinte\n"))
+        g = json.loads(json.dumps(a))
+        g["genes"]["bloc"]["hauteur"] = 2                       # valeur publiée modifiée, racine inchangée
+        self.assertEqual(adn.verifier_feuilles(t.encode(), g), ["feuille gene bloc différente de la valeur publiée dans l'ADN"])
+        self.assertIn("feuille veille différente de racine_veille",
+                      adn.verifier_feuilles(t.encode(), dict(a, racine_veille="ab" * 32)))
+        self.assertEqual(len(adn.verifier_feuilles(t.encode(), dict(a, racine="00" * 32))), 1)    # en-tête refusé
+
+    def test_anciens_adn_recoivent_leurs_feuilles_une_seule_fois(self):
+        fin = self.jours(J1, J2)
+        with unittest.mock.patch.object(adn, "ecrire_feuilles", lambda c, j: []):
+            adn.executer(self.conf, now_s=fin, horo=FauxHorodateurs())     # scellés avant cette version
+        self.assertFalse(adn.fichier_feuilles(self.dest, J1).exists())
+        self.assertEqual(adn.executer(self.conf, now_s=fin + 3600, horo=FauxHorodateurs())["feuilles_publiees"], [J1, J2])
+        self.assertEqual(adn.executer(self.conf, now_s=fin + 7200, horo=FauxHorodateurs())["feuilles_publiees"], [])
+        self.assertEqual(adn.verifier(self.conf), (2, []))
+
+    def test_jamais_de_fichier_qui_ne_redonne_pas_la_racine(self):
+        fin = self.jours(J1)
+        with unittest.mock.patch.object(adn, "ecrire_feuilles", lambda c, j: []):
+            adn.executer(self.conf, now_s=fin, horo=FauxHorodateurs())
+        (self.src.d / "empreintes" / f"{J1}.txt").write_text("autre contenu\n", encoding="utf-8")
+        r = adn.executer(self.conf, now_s=fin + 3600, horo=FauxHorodateurs())
+        self.assertEqual((r["feuilles_publiees"], r["incidents"]), ([], ["adn_feuilles_incoherentes"]))
+        self.assertFalse(adn.fichier_feuilles(self.dest, J1).exists())
+        self.assertEqual(adn.executer(self.conf, now_s=fin + 7200, horo=FauxHorodateurs())["incidents"], [])  # une fois
+
+    def test_verification_detecte_un_fichier_de_feuilles_modifie(self):
+        self.sceller(J1)
+        f = adn.fichier_feuilles(self.dest, J1)
+        t = self.texte(J1)
+        f.chmod(0o666)
+        f.write_bytes(gzip.compress(t.replace(b" releve 00 ", b" releve 01 ", 1), mtime=0))
+        self.assertEqual(adn.verifier(self.conf)[1], [f"feuilles-{J1}.txt.gz : différent des feuilles recalculées"])
+
+    def test_commande_verifier_feuilles(self):
+        self.sceller(J1)
+        args = ["verifier-feuilles", "--feuilles", str(adn.fichier_feuilles(self.dest, J1)),
+                "--adn", str(adn.fichier_adn(self.dest, J1))]
+        with unittest.mock.patch("builtins.print"):
+            self.assertEqual(adn.main(args + ["--empreinte", str(self.src.d / "empreintes" / f"{J1}.txt")]), 0)
+            autre = Path(self.tmp) / "autre.txt"
+            autre.write_text("x\n", encoding="utf-8")
+            self.assertEqual(adn.main(args + ["--empreinte", str(autre)]), 1)
 
 
 if __name__ == "__main__":
