@@ -11,14 +11,16 @@ Feuilles du jour J, dans cet ordre (RFC 9162 : feuille = SHA-256(0x00 || donnée
           jour J (champ detecte_le ou note_le) ; « concerne » = jour touché (champ jour, heure ou racine de l'incident),
           par exemple constaté le 16/10, concerne le 09/10. Les journaux sont en ajout seul et ne sont jamais réécrits :
           la sélection ne change donc plus une fois le jour passé, et un jour déjà scellé n'est jamais refait ;
-  enfin   cinq « gènes » du jour, « adn/1 gene <nom> » + leur valeur en JSON canonique, recopiés dans le fichier ADN
+  enfin   six « gènes » du jour, « adn/1 gene <nom> » + leur valeur en JSON canonique, recopiés dans le fichier ADN
           (clé « genes ») pour que la vérification les relise : code (empreintes SHA-256 de adn.py et archiveur.py),
           horloge (écart serveur / heure officielle, chrony ou timesyncd), bloc (dernier bloc Bitcoin avant minuit UTC
           de fin de journée), temoin (concordance Oracle / témoin Cloudflare), astra (tête du jour du registre de
-          l'IA ASTRA-M, recopiée telle quelle : empreinte de son fichier du jour et dernier hash de sa chaîne). Un gène
-          non disponible est une feuille « statut: indisponible » avec sa raison : l'ADN est produit quand même. Les ADN
-          scellés avant les gènes n'en ont pas (pas de clé « genes »), ceux scellés avant le gène astra n'en ont que
-          quatre : tous restent vérifiables tels quels.
+          l'IA ASTRA-M, recopiée telle quelle : empreinte de son fichier du jour et dernier hash de sa chaîne), tours
+          (incidents de la collecte du jour, recalculés depuis les relevés scellés : minutes sans aucun bloc écrit,
+          minutes de cours écrites en retard, créneaux de 5 minutes sans lecture d'oracle ; la vérification le
+          recalcule). Un gène non disponible est une feuille « statut: indisponible » avec sa raison : l'ADN est
+          produit quand même. Les ADN scellés avant les gènes n'en ont pas (pas de clé « genes »), ceux scellés avant
+          le gène astra n'en ont que quatre, avant le gène tours que cinq : tous restent vérifiables tels quels.
 Fichiers créés une seule fois, jamais réécrits :
   adn/adn-AAAA-MM-JJ.json            racine, racine de la veille, nombre de feuilles par type, méthode ; aucun prix,
                                      aucune donnée personnelle : c'est le seul fichier destiné à être publié ;
@@ -43,7 +45,9 @@ ALGORITHME = "RFC 9162 SHA-256 (feuille 0x00 || donnees, noeud 0x01 || gauche ||
 P_VEILLE, P_EMPREINTE, P_RELEVE, P_INCIDENT = (b"adn/1 veille ", b"adn/1 empreinte\n", b"adn/1 releve\n",
                                                b"adn/1 incident\n")
 P_GENE = b"adn/1 gene "                     # + nom + « \n » + valeur JSON canonique
-NOMS_GENES = ("code", "horloge", "bloc", "temoin", "astra")
+NOMS_GENES = ("code", "horloge", "bloc", "temoin", "astra", "tours")
+SEUIL_RETARD_S = 180             # comme TRACKYZZ (RETARD_MAX_S) : une minute écrite plus tard a été rattrapée
+PERIODE_ORACLES_S = 300          # une lecture d'oracles attendue par créneau de 5 minutes
 TAILLE_MAX_TETE_ASTRA = 4096                 # une tête fait 3 lignes ; au-delà, ce n'est pas une tête
 API_BLOC = "https://mempool.space/api"      # publique, gratuite, sans clé
 REGLE_BLOC = "bloc de plus grande hauteur dont l'horodatage est strictement avant minuit UTC de fin du jour"
@@ -210,9 +214,55 @@ def gene_astra(conf, jour_str, lire=lire_tete_astra):
         return indisponible(f"tête ASTRA illisible : {type(e).__name__}")
 
 
+def plages(minutes_s):
+    """[t, t+60, t+120, t+600] -> ["HH:MM-HH:MM", "HH:MM"] (minutes consécutives regroupées, heure UTC)."""
+    out, debut, prec = [], None, None
+    for t in sorted(minutes_s) + [None]:
+        if t is not None and prec is not None and t == prec + 60:
+            prec = t
+            continue
+        if debut is not None:
+            a, b = ar.iso(debut)[11:16], ar.iso(prec)[11:16]
+            out.append(a if a == b else f"{a}-{b}")
+        debut = prec = t
+    return out
+
+
+def gene_tours(conf, jour_str, releves=None):
+    """Incidents de la collecte du jour, recalculés depuis les relevés scellés (lignes du registre de J, rangées par
+    heure d'écriture) : un tour coupé n'écrit rien et ne peut pas se noter lui-même. Sans bloc : minutes de J où rien
+    n'a été écrit ; en retard : minutes de cours écrites plus de SEUIL_RETARD_S après leur fin ; oracles perdus :
+    créneaux de 5 minutes de J sans lecture d'oracle. Déterministe : la vérification le recalcule."""
+    try:
+        lignes = releves_du_jour(conf["destination"], jour_str) if releves is None else releves
+        j0 = ar.secondes(jour_str + "T00:00:00Z")
+        ecrits, retard, lus = set(), {}, set()
+        for l in lignes:
+            b = json.loads(l)
+            t = ar.secondes(b["collecte"])
+            ecrits.add(t // 60 * 60)
+            f = str(b.get("format", ""))
+            if f.startswith("trackyzz-multi-exchanges/") and b.get("close_time"):
+                r = t - ar.secondes(b["close_time"])
+                if r > SEUIL_RETARD_S:
+                    m = ar.secondes(b["open_time"])
+                    retard[m] = max(retard.get(m, 0), r)
+            elif f.startswith("trackyzz-oracles/") and b.get("open_time"):
+                lus.add(ar.secondes(b["open_time"]) // PERIODE_ORACLES_S * PERIODE_ORACLES_S)
+        sans = [m for m in range(j0, j0 + 86400, 60) if m not in ecrits]
+        perdus = [c for c in range(j0, j0 + 86400, PERIODE_ORACLES_S) if c not in lus]
+        return {"statut": "mesure", "source": "releves scelles du jour", "seuil_retard_s": SEUIL_RETARD_S,
+                "minutes_sans_bloc": len(sans), "plages_sans_bloc": plages(sans),
+                "minutes_en_retard": len(retard), "plages_en_retard": plages(retard),
+                "retard_max_s": max(retard.values(), default=0),
+                "oracles_perdus": len(perdus), "creneaux_oracles_perdus": [ar.iso(c)[11:16] for c in perdus]}
+    except Exception as e:
+        return indisponible(f"relevés du jour illisibles : {type(e).__name__}")
+
+
 def mesurer_genes(conf, jour_str, now_s):
     return {"code": gene_code(), "horloge": gene_horloge(now_s), "bloc": gene_bloc(jour_str),
-            "temoin": gene_temoin(conf, jour_str), "astra": gene_astra(conf, jour_str)}
+            "temoin": gene_temoin(conf, jour_str), "astra": gene_astra(conf, jour_str), "tours": gene_tours(conf, jour_str)}
 
 
 def noms_genes(genes):
@@ -406,6 +456,9 @@ def verifier(conf):
             problemes.append(f"{p.name} : archive ou empreinte du jour introuvable")
         elif p.read_bytes() != contenu_adn(conf, j, a["racine_veille"], *r, g):
             problemes.append(f"{p.name} : recalcul différent (racine ou comptes)")
+        elif (g and g.get("tours", {}).get("statut") == "mesure"         # « indisponible » n'affirme rien
+              and g["tours"] != gene_tours(conf, j, r[1]["releves_lignes"])):
+            problemes.append(f"{p.name} : gène tours différent du recalcul depuis les relevés")
         precedent = a
     return n, problemes
 

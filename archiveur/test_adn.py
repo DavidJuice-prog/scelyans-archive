@@ -371,13 +371,109 @@ class TestGenes(unittest.TestCase):
             self.assertEqual(adn.gene_astra({"astra": d}, J1)["statut"], "indisponible")
 
 
+def ligne(**b):
+    return (json.dumps(b, sort_keys=True) + "\n").encode()
+
+
+def releves_avec_incidents():
+    """Un jour réel en miniature : un tour par minute (bloc écrit 140 s après la fin de sa minute), oracles toutes les
+    5 minutes ; tours coupés à 09:08-09:09 et 13:00 (comme les 10/10 et 13/10/2026), minute 09:06 rattrapée en retard."""
+    out = []
+    for t in range(T1 + 20, T1 + 86400, 60):
+        m = t // 60 * 60
+        if ar.iso(m)[11:16] in ("09:08", "09:09", "13:00"):
+            continue
+        out.append(ligne(format="trackyzz-multi-exchanges/1", collecte=ar.iso(t), open_time=ar.iso(m - 180),
+                         close_time=ar.iso(m - 120)))
+        if ar.iso(m)[11:16] == "09:10":
+            out.append(ligne(format="trackyzz-multi-exchanges/1", collecte=ar.iso(t), open_time=ar.iso(m - 240),
+                             close_time=ar.iso(m - 180)))
+        if m % 300 == 0:
+            out.append(ligne(format="trackyzz-oracles/1", collecte=ar.iso(t), open_time=ar.iso(m)))
+    return out
+
+
+class TestGeneTours(unittest.TestCase):
+    def test_tours_manquants_retards_et_oracles_perdus(self):
+        g = adn.gene_tours({}, J1, releves_avec_incidents())
+        self.assertEqual((g["statut"], g["minutes_sans_bloc"], g["plages_sans_bloc"]), ("mesure", 3, ["09:08-09:09", "13:00"]))
+        self.assertEqual((g["minutes_en_retard"], g["plages_en_retard"], g["retard_max_s"]), (1, ["09:06"], 200))
+        self.assertEqual((g["oracles_perdus"], g["creneaux_oracles_perdus"]), (1, ["13:00"]))
+        texte = ar.json_canonique(g).decode()
+        for mot in ("collecte", "prev_hash", "VERIFIED", "kraken", "prix", "mediane", "observations", "@"):
+            self.assertNotIn(mot, texte)                       # même règle que le fichier publié
+
+    def test_jour_sans_incident(self):
+        lignes = [l for l in releves_avec_incidents()]
+        t = T1 + 9 * 3600 + 8 * 60 + 20
+        for k in (0, 1):                                       # les deux tours de 09:08 et 09:09, à l'heure
+            lignes.append(ligne(format="trackyzz-multi-exchanges/1", collecte=ar.iso(t + 60 * k),
+                                open_time=ar.iso(t - 20 + 60 * k - 180), close_time=ar.iso(t - 20 + 60 * k - 120)))
+        en_retard = {"collecte": "2026-10-15T09:10:20Z", "open_time": "2026-10-15T09:06:00Z"}
+        lignes = [l for l in lignes if en_retard.items() - json.loads(l).items()]     # minute 09:06 : plus de retard
+        lignes.append(ligne(format="trackyzz-multi-exchanges/1", collecte=ar.iso(T1 + 13 * 3600 + 20),
+                            open_time=ar.iso(T1 + 13 * 3600 - 180), close_time=ar.iso(T1 + 13 * 3600 - 120)))
+        lignes.append(ligne(format="trackyzz-oracles/1", collecte=ar.iso(T1 + 13 * 3600 + 80),
+                            open_time=ar.iso(T1 + 13 * 3600 + 60)))   # lecture refaite à 13:01 : créneau couvert
+        g = adn.gene_tours({}, J1, lignes)
+        self.assertEqual((g["minutes_sans_bloc"], g["minutes_en_retard"], g["oracles_perdus"]), (0, 0, 0))
+        self.assertEqual((g["plages_sans_bloc"], g["plages_en_retard"], g["creneaux_oracles_perdus"]), ([], [], []))
+
+    def test_releves_illisibles_ou_archive_absente(self):
+        self.assertEqual(adn.gene_tours({}, J1, [b"pas du json\n"])["statut"], "indisponible")
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(adn.gene_tours({"destination": Path(d)}, J1)["statut"], "indisponible")
+
+    def test_mesurer_genes_contient_tours(self):
+        with tempfile.TemporaryDirectory() as d, \
+                unittest.mock.patch.object(adn, "gene_bloc", lambda j: adn.indisponible("test")), \
+                unittest.mock.patch.object(adn, "gene_horloge", lambda n: adn.indisponible("test")):
+            g = adn.mesurer_genes({"destination": Path(d)}, J1, T1)
+        self.assertEqual(adn.noms_genes(g), ["code", "horloge", "bloc", "temoin", "astra", "tours"])
+
+
 class TestGenesDansADN(TestADN):
+    def avec_tours(self, conf, j, n):
+        return {**faux_genes(conf, j, n), "tours": adn.gene_tours(conf, j)}
+
+    def test_gene_tours_scelle_dans_l_adn_du_jour_et_recalcule(self):
+        fin = self.jours(J1)
+        adn.executer(self.conf, now_s=fin, horo=FauxHorodateurs(), genes=self.avec_tours)
+        a = self.lire(J1)
+        t = a["genes"]["tours"]
+        self.assertEqual((t["minutes_sans_bloc"], t["oracles_perdus"]), (1440 - 288, 288))   # un tour toutes les 5 min
+        self.assertEqual(a["feuilles"]["genes"], 6)
+        self.assertIn("astra, tours :", a["ordre_feuilles"])
+        texte = adn.fichier_adn(self.dest, J1).read_text(encoding="utf-8")
+        for mot in ("collecte", "prev_hash", "VERIFIED", "kraken", "prix", "mediane", "observations", "@"):
+            self.assertNotIn(mot, texte)
+        self.assertEqual(adn.verifier(self.conf), (1, []))
+        p = adn.fichier_adn(self.dest, J1)
+        p.chmod(0o666)
+        p.write_text(texte.replace('"oracles_perdus":288', '"oracles_perdus":0'), encoding="utf-8")
+        self.assertEqual(adn.verifier(self.conf)[1], [f"adn-{J1}.json : recalcul différent (racine ou comptes)"])
+
+    def test_gene_tours_faux_mais_bien_scelle_detecte(self):
+        """Racine cohérente avec un gène tours inventé : seul le recalcul depuis les relevés peut le voir."""
+        faux = lambda c, j, n: {**faux_genes(c, j, n), "tours": {"statut": "mesure", "minutes_sans_bloc": 0}}
+        fin = self.jours(J1)
+        adn.executer(self.conf, now_s=fin, horo=FauxHorodateurs(), genes=faux)
+        self.assertEqual(adn.verifier(self.conf)[1], [f"adn-{J1}.json : gène tours différent du recalcul depuis les relevés"])
+
+    def test_adn_scelle_avant_le_gene_tours_reste_valide(self):
+        fin = self.jours(J1, J2)
+        adn.executer(self.conf, now_s=ar.secondes(J1 + "T00:00:00Z") + 86400 + 900, horo=FauxHorodateurs())
+        self.assertEqual(self.lire(J1)["feuilles"]["genes"], 5)
+        adn.executer(self.conf, now_s=fin, horo=FauxHorodateurs(), genes=self.avec_tours)
+        self.assertEqual(self.lire(J2)["feuilles"]["genes"], 6)
+        self.assertEqual(adn.verifier(self.conf), (2, []))
+
     def test_adn_produit_meme_si_tout_est_indisponible(self):
         indispo = lambda conf, j, n: {k: adn.indisponible("panne") for k in adn.NOMS_GENES}
         fin = self.jours(J1)
         r = adn.executer(self.conf, now_s=fin, horo=FauxHorodateurs(), genes=indispo)
         self.assertEqual(r["adn_construits"], [J1])
-        self.assertEqual(self.lire(J1)["feuilles"]["genes"], 5)
+        self.assertEqual(self.lire(J1)["feuilles"]["genes"], len(adn.NOMS_GENES))
         self.assertEqual(adn.verifier(self.conf), (1, []))
 
     def test_ancien_adn_sans_genes_valide_et_gene_modifie_detecte(self):
