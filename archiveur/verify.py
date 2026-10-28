@@ -8,7 +8,12 @@ est authentique, sans avoir à contacter l'éditeur ni à lui faire confiance
 sur parole.
 
 Usage :
-    python verify.py adn-2026-10-24.json [adn-2026-10-24.json.bitcoin.ots]
+    python verify.py adn-2026-10-24.json [adn-2026-10-24.json.bitcoin.ots] [adn-2026-10-23.json]
+                     [--feuilles feuilles-2026-10-24.txt.gz] [--trackyzz DOSSIER]
+
+Sans fichier .ots, veille ou feuilles en argument, le script les cherche à côté du maillon ; la veille est ensuite
+cherchée sur trackyzz.com. Couleurs : actives dans la console Windows 10+ et les terminaux ; jamais dans un fichier
+(ou avec la variable NO_COLOR).
 
 Ce que ce script vérifie, et comment :
 
@@ -34,7 +39,9 @@ Ce que ce script vérifie, et comment :
    AU PLUS TARD à un bloc Bitcoin précis. Ce script lit le fichier .ots
    directement via la bibliothèque Python opentimestamps (pas via
    l'exécutable `ots`, qui peut planter sur certains Windows faute
-   d'OpenSSL), vérifie que l'empreinte du fichier correspond, puis
+   d'OpenSSL). Si elle n'est pas installée, il la prend, sans rien
+   installer, dans le dossier TRACKYZZ (app\ancrage.py et son .venv,
+   option --trackyzz). Il vérifie que l'empreinte du fichier correspond, puis
    confirme la racine Merkle attestée auprès de mempool.space — c'est
    la vérification la plus difficile à falsifier, car elle repose sur
    la preuve de travail de tout le réseau Bitcoin, pas sur une
@@ -47,28 +54,45 @@ Ce que ce script vérifie, et comment :
    pas : ce cas est signalé en ATTENTION (à vérifier à la main), jamais en
    ECHEC, car l'absence d'un fichier dans l'historique ne prouve pas une falsification.
 
-5. Continuité de la chaîne (si le maillon de la veille est fourni)
+5. Continuité de la chaîne
    Vérifie que racine_veille correspond bien à la racine du jour
    précédent, ce qui prouve que la chaîne n'a pas été rompue ou
-   réécrite rétroactivement.
+   réécrite rétroactivement. Maillon de la veille : fourni, sinon à côté
+   du maillon, sinon téléchargé sur trackyzz.com. Introuvable : ATTENTION
+   (non vérifiable), jamais ECHEC. Le premier maillon n'a pas de veille.
+
+6. Gène tours (incidents de la collecte du jour)
+   Minutes sans aucun bloc, minutes de cours écrites en retard, créneaux
+   de 5 minutes sans lecture d'oracle. Un incident n'est pas une
+   falsification : il est affiché en ATTENTION. Des comptes incohérents
+   (nombre différent de la liste) sont un ECHEC. Les maillons scellés
+   avant ce gène (28/10/2026) n'en ont pas.
+
+7. Racine recalculée depuis les feuilles (si feuilles-AAAA-MM-JJ.txt.gz est fourni ou à côté)
+   Une feuille par ligne du registre : environ 21 000 par jour. Le fichier
+   publié ne contient que leurs empreintes SHA-256, jamais les relevés ni
+   les prix. Ce script recalcule lui-même la racine (RFC 9162), et les
+   feuilles qu'il peut reconstruire seul : veille (depuis racine_veille)
+   et gènes (depuis les valeurs publiées dans le maillon).
 
 Ce que ce script ne fait PAS (honnêteté sur les limites actuelles) :
-   - Il ne recalcule pas la racine du jour à partir des 21 000 relevés
-     de prix bruts (l'algorithme exact de construction de l'arbre de
-     Merkle, décrit par les champs "algorithme"/"methode"/"ordre_feuilles",
-     doit être documenté publiquement pour que cette étape soit possible
-     à quiconque, pas seulement à TRACKYZZ). C'est la prochaine étape à
-     publier pour une vérification totalement de bout en bout.
+   - Il ne relit pas les relevés eux-mêmes (ils contiennent des prix et ne
+     sont pas publiés) : il vérifie que la racine scellée est bien celle de
+     ces ~21 000 empreintes. Une preuve d'inclusion d'un relevé précis
+     (adn.py preuve / verifier-preuve) reste remise à la demande.
 """
 
 import sys
 import os
 import json
+import gzip
 import hashlib
+import importlib.util
 import re
 import urllib.request
 import urllib.error
-from datetime import datetime, timezone
+from datetime import date, timedelta
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Configuration — à compléter au fur et à mesure que l'infrastructure existe
@@ -94,18 +118,48 @@ CHAMPS_ATTENDUS = [
 ]
 
 GENES_ATTENDUS = ["astra", "bloc", "code", "horloge", "temoin"]
+GENES_FACULTATIFS = ["tours"]          # absent des maillons scellés avant le 28/10/2026
+
+# Maillons publiés (pour retrouver celui de la veille).
+ADN_URL = "https://trackyzz.com/adn/adn-{jour}.json"
+
+# Dossier TRACKYZZ (app\ancrage.py et son .venv) : bibliothèque OpenTimestamps sans installation.
+TRACKYZZ_DEFAUT = Path.home() / "OneDrive" / "Desktop" / "TRACKYZZ v1 GEMINI"
+
+COULEURS = False
+
+
+def activer_couleurs(flux=None):
+    """Couleurs ANSI seulement vers un terminal (jamais dans un fichier), sauf NO_COLOR. Sous Windows, la console
+    n'interprète les codes qu'une fois le mode « terminal virtuel » activé (Windows 10 et suivants)."""
+    flux = flux or sys.stdout
+    if os.environ.get("NO_COLOR") or not getattr(flux, "isatty", lambda: False)():
+        return False
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h, mode = k.GetStdHandle(-11), ctypes.c_uint32()
+        return bool(k.GetConsoleMode(h, ctypes.byref(mode)) and k.SetConsoleMode(h, mode.value | 0x0004))
+    except Exception:
+        return False
+
+
+def _c(code, texte):
+    return f"\033[{code}m{texte}\033[0m" if COULEURS else texte
 
 
 def ok(msg):
-    print(f"  \033[92m[OK]\033[0m {msg}")
+    print(f"  {_c(92, '[OK]')} {msg}")
 
 
 def fail(msg):
-    print(f"  \033[91m[ECHEC]\033[0m {msg}")
+    print(f"  {_c(91, '[ECHEC]')} {msg}")
 
 
 def warn(msg):
-    print(f"  \033[93m[ATTENTION]\033[0m {msg}")
+    print(f"  {_c(93, '[ATTENTION]')} {msg}")
 
 
 def info(msg):
@@ -134,7 +188,9 @@ def verifier_structure(d):
                 fail(f"gène manquant : {g}")
                 valide = False
     if valide:
-        ok(f"les {len(CHAMPS_ATTENDUS)} champs et {len(GENES_ATTENDUS)} gènes attendus sont présents")
+        en_plus = [g for g in GENES_FACULTATIFS if g in d.get("genes", {})]
+        ok(f"les {len(CHAMPS_ATTENDUS)} champs et {len(GENES_ATTENDUS)} gènes attendus sont présents"
+           + (f" (+ {', '.join(en_plus)})" if en_plus else ""))
         ok(f"jour scellé : {d.get('jour')}")
         ok(f"racine : {d.get('racine')}")
     return valide
@@ -201,7 +257,38 @@ def verifier_gene_bloc(d):
         return False
 
 
-def verifier_opentimestamps(json_path, ots_path):
+def bibliotheque_ots(dossier_trackyzz=None):
+    """(fonction de lecture d'un .ots, classe d'attestation Bitcoin, origine), ou None. D'abord la bibliothèque
+    opentimestamps si elle est installée ; sinon, sans rien installer, app\\ancrage.py de TRACKYZZ avec les
+    bibliothèques de son .venv (ajoutées au chemin de recherche de Python, jamais copiées ni modifiées)."""
+    try:
+        from opentimestamps.core.timestamp import DetachedTimestampFile
+        from opentimestamps.core.notary import BitcoinBlockHeaderAttestation
+        from opentimestamps.core.serialize import StreamDeserializationContext
+
+        def lire(p):
+            with open(p, "rb") as f:
+                return DetachedTimestampFile.deserialize(StreamDeserializationContext(f))
+        return lire, BitcoinBlockHeaderAttestation, "bibliothèque opentimestamps installée"
+    except ImportError:
+        pass
+    d = Path(dossier_trackyzz or os.environ.get("SCELYANS_TRACKYZZ") or TRACKYZZ_DEFAUT)
+    ancrage = d / "app" / "ancrage.py"
+    paquets = [p for p in [d / ".venv" / "Lib" / "site-packages", *sorted((d / ".venv" / "lib").glob("python3*/site-packages"))]
+               if (p / "opentimestamps").is_dir()]
+    if not ancrage.exists() or not paquets:
+        return None
+    sys.path.append(str(paquets[0]))                    # en dernier : ne masque jamais une bibliothèque déjà présente
+    try:
+        spec = importlib.util.spec_from_file_location("ancrage_trackyzz", ancrage)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m.load, m.BitcoinBlockHeaderAttestation, f"app\\ancrage.py de TRACKYZZ ({d})"
+    except Exception:
+        return None
+
+
+def verifier_opentimestamps(json_path, ots_path, dossier_trackyzz=None):
     """
     Vérifie le fichier .bitcoin.ots directement via la bibliothèque Python
     opentimestamps, sans passer par l'exécutable `ots` (qui plante sur
@@ -217,19 +304,16 @@ def verifier_opentimestamps(json_path, ots_path):
         fail(f"fichier introuvable : {ots_path}")
         return False
 
-    try:
-        from opentimestamps.core.timestamp import DetachedTimestampFile
-        from opentimestamps.core.notary import BitcoinBlockHeaderAttestation
-        from opentimestamps.core.serialize import StreamDeserializationContext
-    except ImportError:
-        warn("la bibliothèque 'opentimestamps' n'est pas installée sur cette machine "
-             "(pip install opentimestamps-client) — impossible de vérifier cette étape ici")
+    lib = bibliotheque_ots(dossier_trackyzz)
+    if lib is None:
+        warn("bibliothèque OpenTimestamps introuvable : ni installée (pip install opentimestamps-client), ni dans "
+             "le dossier TRACKYZZ (option --trackyzz) — impossible de vérifier cette étape ici")
         return None
+    lire_ots, BitcoinBlockHeaderAttestation, origine = lib
+    info(f"lecture du .ots : {origine}")
 
     try:
-        with open(ots_path, "rb") as f:
-            ctx = StreamDeserializationContext(f)
-            dtf = DetachedTimestampFile.deserialize(ctx)
+        dtf = lire_ots(ots_path)
 
         with open(json_path, "rb") as f:
             contenu = f.read()
@@ -284,16 +368,49 @@ def verifier_opentimestamps(json_path, ots_path):
         return False
 
 
-def verifier_continuite(d, maillon_veille_path):
-    section("5. Continuité de la chaîne")
-    if not maillon_veille_path:
-        warn("maillon de la veille non fourni, étape sautée")
-        return None
-    if not os.path.exists(maillon_veille_path):
-        fail(f"fichier introuvable : {maillon_veille_path}")
-        return False
+def trouver_veille(d, maillon_path, maillon_veille_path):
+    """(maillon de la veille, d'où il vient) ou (None, raison). Ordre : fichier fourni, fichier à côté du maillon,
+    trackyzz.com. Un fichier fourni mais introuvable est une erreur de l'utilisateur, pas une absence."""
+    jv = d.get("jour_veille")
+    if maillon_veille_path:
+        if not os.path.exists(maillon_veille_path):
+            raise FileNotFoundError(maillon_veille_path)
+        return charger_maillon(maillon_veille_path), maillon_veille_path
+    voisin = Path(maillon_path).with_name(f"adn-{jv}.json")
+    if voisin.exists():
+        return charger_maillon(voisin), str(voisin)
+    url = ADN_URL.format(jour=jv)
+    try:
+        return json.loads(http_get_json(url)), url
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+        return None, f"ni fourni, ni à côté du maillon, ni sur {url} ({e})"
 
-    veille = charger_maillon(maillon_veille_path)
+
+def verifier_continuite(d, maillon_veille_path, maillon_path="."):
+    section("5. Continuité de la chaîne")
+    if d.get("racine_veille") is None and d.get("jour_veille") is None:
+        ok("premier maillon de la chaîne : pas de veille")
+        return True
+    try:
+        attendu = (date.fromisoformat(d["jour"]) - timedelta(days=1)).isoformat()
+    except (KeyError, TypeError, ValueError):
+        fail(f"jour illisible : {d.get('jour')}")
+        return False
+    if d.get("jour_veille") != attendu:
+        fail(f"jour_veille ({d.get('jour_veille')}) n'est pas la veille de {d.get('jour')} ({attendu})")
+        return False
+    try:
+        veille, origine = trouver_veille(d, maillon_path, maillon_veille_path)
+    except FileNotFoundError as e:
+        fail(f"fichier introuvable : {e}")
+        return False
+    if veille is None:
+        warn(f"maillon de la veille ({attendu}) introuvable : {origine} — continuité non vérifiable ici")
+        return None
+    info(f"maillon de la veille : {origine}")
+    if veille.get("jour") != attendu:
+        fail(f"le maillon de la veille porte le jour {veille.get('jour')}, et non {attendu}")
+        return False
     racine_veille_declaree = d.get("racine_veille")
     racine_veille_reelle = veille.get("racine")
 
@@ -361,27 +478,156 @@ def verifier_gene_code(d):
     return True if tout_ok else None
 
 
-def main():
-    if len(sys.argv) < 2:
-        print(__doc__)
-        sys.exit(1)
+def verifier_gene_tours(d):
+    section("6. Gène tours (incidents de la collecte du jour)")
+    t = d.get("genes", {}).get("tours")
+    if not t:
+        warn("aucun gène tours : maillon scellé avant ce gène (28/10/2026), étape sautée")
+        return None
+    if t.get("statut") != "mesure":
+        warn(f"gène tours non mesuré ce jour-là : {t.get('raison')}")
+        return None
 
-    maillon_path = sys.argv[1]
-    ots_path = sys.argv[2] if len(sys.argv) > 2 else (maillon_path + ".bitcoin.ots")
+    def duree(plages):
+        n = 0
+        for p in plages:
+            a, _, b = p.partition("-")
+            ha, ma = map(int, a.split(":"))
+            hb, mb = map(int, (b or a).split(":"))
+            n += (hb * 60 + mb) - (ha * 60 + ma) + 1
+        return n
+    try:
+        coherent = (duree(t["plages_sans_bloc"]) == t["minutes_sans_bloc"]
+                    and duree(t["plages_en_retard"]) == t["minutes_en_retard"]
+                    and len(t["creneaux_oracles_perdus"]) == t["oracles_perdus"]
+                    and (t["retard_max_s"] > t["seuil_retard_s"]) == (t["minutes_en_retard"] > 0))
+    except (KeyError, TypeError, ValueError, AttributeError) as e:
+        fail(f"gène tours illisible ({type(e).__name__})")
+        return False
+    if not coherent:
+        fail("gène tours incohérent : les nombres ne correspondent pas aux listes")
+        return False
+    if t["minutes_sans_bloc"] or t["minutes_en_retard"] or t["oracles_perdus"]:
+        if t["minutes_sans_bloc"]:
+            warn(f"{t['minutes_sans_bloc']} minute(s) sans aucun bloc (UTC) : {', '.join(t['plages_sans_bloc'])}")
+        if t["minutes_en_retard"]:
+            warn(f"{t['minutes_en_retard']} minute(s) de cours écrite(s) en retard (jusqu'à {t['retard_max_s']} s) : "
+                 f"{', '.join(t['plages_en_retard'])}")
+        if t["oracles_perdus"]:
+            warn(f"{t['oracles_perdus']} lecture(s) d'oracles perdue(s) (UTC) : {', '.join(t['creneaux_oracles_perdus'])}")
+        info("incidents de collecte notés et scellés : ce n'est pas une falsification")
+    else:
+        ok("aucun tour manqué, aucun retard, aucune lecture d'oracles perdue")
+    return True
+
+
+# Recalcul indépendant de la racine (RFC 9162 : feuille 0x00 || données, nœud 0x01 || gauche || droite).
+
+def _feuille(donnees):
+    return hashlib.sha256(b"\x00" + donnees).digest()
+
+
+def _racine(h):
+    while len(h) > 1:                                   # par niveaux : un nœud sans frère monte tel quel
+        h = [hashlib.sha256(b"\x01" + h[i] + h[i + 1]).digest() if i + 1 < len(h) else h[i] for i in range(0, len(h), 2)]
+    return h[0]
+
+
+def _json_canonique(v):
+    return (json.dumps(v, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def lire_feuilles(path):
+    b = Path(path).read_bytes()
+    return (gzip.decompress(b) if b[:2] == b"\x1f\x8b" else b).decode("ascii")
+
+
+def verifier_feuilles(d, feuilles_path):
+    section("7. Racine recalculée depuis les empreintes des feuilles")
+    if not feuilles_path:
+        warn("aucun fichier feuilles-AAAA-MM-JJ.txt.gz fourni ni à côté du maillon, étape sautée")
+        return None
+    try:
+        lignes = lire_feuilles(feuilles_path).splitlines()
+    except (OSError, ValueError, EOFError) as e:
+        fail(f"fichier des feuilles illisible ({type(e).__name__})")
+        return False
+    tete = ["adn-scelyans-feuilles/1", f"jour {d.get('jour')}", f"racine {d.get('racine')}",
+            f"feuilles {d.get('feuilles', {}).get('total')}"]
+    if lignes[:4] != tete:
+        fail("en-tête différent du maillon (jour, racine ou nombre de feuilles)")
+        return False
+    h, types = [], []
+    for k, l in enumerate(lignes[4:]):
+        m = re.fullmatch(r"(\d+) (veille|empreinte|releve [0-2]\d|incident|gene [a-z]+) ([0-9a-f]{64})", l)
+        if not m or int(m.group(1)) != k:
+            fail(f"ligne {k + 5} illisible ou hors d'ordre")
+            return False
+        types.append(m.group(2))
+        h.append(bytes.fromhex(m.group(3)))
+    f = d.get("feuilles", {})
+    info(f"{len(h)} feuilles ({f.get('releves')} relevés, soit environ 21 000 par jour complet)")
+    tout_ok = True
+    genes = d.get("genes") or {}
+    noms = [n for n in ["code", "horloge", "bloc", "temoin", "astra", "tours"] if n in genes]
+    attendu = (["veille", "empreinte"] + ["releve"] * f.get("releves", -1) + ["incident"] * f.get("incidents", -1)
+               + [f"gene {n}" for n in noms])
+    if [t[:6] if t.startswith("releve") else t for t in types] != attendu:
+        fail("types de feuilles différents des comptes du maillon")
+        tout_ok = False
+    if h and h[0] == _feuille(b"adn/1 veille " + (d.get("racine_veille") or "aucune").encode() + b"\n"):
+        ok("feuille veille recalculée depuis racine_veille")
+    else:
+        fail("feuille veille différente de racine_veille")
+        tout_ok = False
+    for t, x in zip(types, h):
+        if t.startswith("gene ") and t[5:] in genes:
+            if x != _feuille(b"adn/1 gene " + t[5:].encode() + b"\n" + _json_canonique(genes[t[5:]])):
+                fail(f"feuille {t} différente de la valeur publiée dans le maillon")
+                tout_ok = False
+    if h and _racine(h).hex() == d.get("racine"):
+        ok(f"racine recalculée sur les {len(h)} feuilles : identique à la racine scellée")
+    else:
+        fail("racine recalculée DIFFÉRENTE de la racine scellée")
+        tout_ok = False
+    return tout_ok
+
+
+def main(argv=None):
+    import argparse
+    global COULEURS
+    try:
+        sys.stdout.reconfigure(errors="replace")        # jamais d'arrêt sur un accent dans une console limitée
+    except (AttributeError, ValueError):
+        pass
+    COULEURS = activer_couleurs()
+    p = argparse.ArgumentParser(description="Vérificateur public des maillons ADN Scelyans")
+    p.add_argument("maillon")
+    p.add_argument("ots", nargs="?")
+    p.add_argument("veille", nargs="?")
+    p.add_argument("--feuilles")
+    p.add_argument("--trackyzz", help="dossier TRACKYZZ (app\\ancrage.py et .venv) pour lire les .ots sans installation")
+    a = p.parse_args(argv)
+
+    maillon_path = a.maillon
+    ots_path = a.ots or (maillon_path + ".bitcoin.ots")
     if not os.path.exists(ots_path):
         ots_path = None
-
-    maillon_veille_path = sys.argv[3] if len(sys.argv) > 3 else None
-
     print(f"Vérification de : {maillon_path}")
     d = charger_maillon(maillon_path)
+    feuilles_path = a.feuilles
+    if not feuilles_path:
+        voisin = Path(maillon_path).with_name(f"feuilles-{d.get('jour')}.txt.gz")
+        feuilles_path = str(voisin) if voisin.exists() else None
 
     resultats = {}
     resultats["structure"] = verifier_structure(d)
     resultats["bloc"] = verifier_gene_bloc(d)
-    resultats["ots"] = verifier_opentimestamps(maillon_path, ots_path)
+    resultats["ots"] = verifier_opentimestamps(maillon_path, ots_path, a.trackyzz)
     resultats["code"] = verifier_gene_code(d)
-    resultats["continuite"] = verifier_continuite(d, maillon_veille_path)
+    resultats["continuite"] = verifier_continuite(d, a.veille, maillon_path)
+    resultats["tours"] = verifier_gene_tours(d)
+    resultats["feuilles"] = verifier_feuilles(d, feuilles_path)
 
     section("Résumé")
     for nom, statut in resultats.items():
@@ -392,14 +638,12 @@ def main():
         else:
             warn(f"{nom} (non vérifiable avec les éléments fournis)")
 
-    if (resultats["structure"] is False or resultats["bloc"] is False or resultats["ots"] is False
-            or resultats["continuite"] is False):
+    if any(resultats[n] is False for n in ("structure", "bloc", "ots", "continuite", "tours", "feuilles")):
         print("\nCONCLUSION : ce maillon présente des incohérences. Ne pas s'y fier sans investigation.")
-        sys.exit(2)
-    else:
-        print("\nCONCLUSION : aucune incohérence détectée sur les éléments vérifiables.")
-        sys.exit(0)
+        return 2
+    print("\nCONCLUSION : aucune incohérence détectée sur les éléments vérifiables.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

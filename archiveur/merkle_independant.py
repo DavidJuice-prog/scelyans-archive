@@ -34,22 +34,22 @@ Spécification (RFC 9162 §2.1, telle que déclarée par Scelyans)
   interne ; seule la sérialisation finale (JSON, fichiers texte) utilise de
   l'hexadécimal minuscule (.hex()).
 
-IMPORTANT — ce que ce script ne peut PAS faire aujourd'hui
-------------------------------------------------------------
-Le fichier public adn-AAAA-MM-JJ.json ne contient PAS les feuilles brutes :
-son champ "feuilles" n'est qu'un compteur ({"total": ..., "releves": ...,
-...}), pas les données elles-mêmes. Recalculer la vraie racine d'un jour
-réel suppose donc d'avoir, en plus du maillon publié :
-  1. le fichier d'empreinte TRACKYZZ du jour (empreintes/<jour>.txt),
-  2. les relevés horaires bruts de ce jour (un par heure, 24 au total),
-  3. les lignes d'incidents/trous concernant ce jour,
-  4. les 5 "gènes" du jour (bloc, code, horloge, témoin, astra).
-Tant que ces éléments bruts ne sont pas publiés quelque part (TRACKYZZ les a
-peut-être déjà — à vérifier dans trackyzz-empreintes), ce script ne peut
-être exercé que sur des exemples synthétiques (voir --autotest) ou sur un
-jeu de fichiers qu'on lui fournit explicitement (voir --racine).
-Ce script est donc le MOTEUR prêt à l'emploi ; la question ouverte est la
-publication des données brutes qui lui serviraient d'entrée réelle.
+Les feuilles d'un jour réel
+----------------------------
+Une feuille par élément, dans cet ordre (voir adn.py) :
+  1. la veille (« adn/1 veille <racine de la veille> »),
+  2. l'empreinte TRACKYZZ du jour (empreintes/<jour>.txt),
+  3. CHAQUE LIGNE du registre du jour (un bloc par paire et par minute,
+     plus les cours et les oracles) : environ 21 000 feuilles par jour
+     complet — et non 24 « relevés horaires » ;
+  4. les incidents constatés ce jour-là,
+  5. les gènes du jour : code, horloge, bloc, témoin, astra, et tours
+     (incidents de la collecte, depuis le 28/10/2026).
+Les relevés contiennent des prix : ils ne sont pas publiés. Ce qui est
+publié, c'est feuilles-AAAA-MM-JJ.txt.gz : l'empreinte SHA-256 de chaque
+feuille, une par ligne (« <position> <type> <empreinte> »). Ce script en
+recalcule la racine (option --feuilles), sans aucun code du projet, et la
+compare au champ "racine" du maillon publié.
 
 Usage
 -----
@@ -67,9 +67,16 @@ Usage
     python3 merkle_independant.py --racine FICHIER1 ... --attendu HEX
         Comme ci-dessus, mais compare aussi au hex attendu et sort avec le
         code 0 (identique) ou 2 (différent).
+
+    python3 merkle_independant.py --feuilles feuilles-AAAA-MM-JJ.txt.gz [--adn adn-AAAA-MM-JJ.json | --attendu HEX]
+        Recalcule la racine d'un jour réel depuis les empreintes publiées de
+        ses ~21 000 feuilles, et la compare à celle du maillon (code 0 ou 2).
 """
 
 import sys
+import gzip
+import json
+import re
 import hashlib
 import argparse
 
@@ -233,18 +240,60 @@ def autotest() -> bool:
     resultat = verifier_chemin(0, 5, _h(b"pas la bonne feuille"), chemin0, racine5)
     check("une feuille erronee est bien rejetee", resultat is False)
 
-    # 24 feuilles (taille réelle d'un jour ADN : veille + empreinte + 22
-    # autres leaves type — ici simplifié a 24 feuilles generiques) : on
-    # vérifie juste l'auto-cohérence racine/chemin sur toutes les feuilles.
-    feuilles24 = [_h(f"feuille {i}".encode()) for i in range(24)]
-    racine24 = racine_merkle(feuilles24)
-    tout_ok_24 = all(
-        verifier_chemin(i, 24, feuilles24[i], chemin_merkle(i, feuilles24), racine24)
-        for i in range(24)
-    )
-    check("auto-coherence racine/chemin sur 24 feuilles (taille d'un jour ADN)", tout_ok_24)
+    # Taille réelle d'un jour ADN : 21 006 feuilles (veille, empreinte, ~21 000
+    # lignes du registre, gènes). La racine récursive doit égaler un calcul
+    # par niveaux (nœud sans frère promu tel quel), et les chemins d'inclusion
+    # doivent tenir aux bords et au milieu de l'arbre.
+    n = 21006
+    feuilles_jour = [_h(f"feuille {i}".encode()) for i in range(n)]
+    racine_jour = racine_merkle(feuilles_jour)
+    check(f"racine sur {n} feuilles == calcul par niveaux", racine_jour == _racine_par_niveaux(feuilles_jour))
+    indices = [0, 1, 2, n // 2, 16383, 16384, n - 2, n - 1]
+    check(f"chemins d'inclusion sur {n} feuilles (indices {indices})",
+          all(verifier_chemin(i, n, feuilles_jour[i], chemin_merkle(i, feuilles_jour), racine_jour) for i in indices))
+    check(f"une feuille déplacée sur {n} change la racine",
+          racine_merkle(feuilles_jour[:5] + [feuilles_jour[6], feuilles_jour[5]] + feuilles_jour[7:]) != racine_jour)
+
+    # Lecture d'un fichier de feuilles publié (format feuilles-AAAA-MM-JJ.txt.gz).
+    texte = "\n".join(["adn-scelyans-feuilles/1", "jour 2026-10-15", f"racine {attendu5.hex()}", "feuilles 5"]
+                      + [f"{i} releve 00 {f.hex()}" for i, f in enumerate(feuilles5)]) + "\n"
+    check("racine lue depuis un fichier de feuilles == racine attendue",
+          racine_fichier_feuilles(gzip.compress(texte.encode()))[0] == attendu5)
+    try:
+        racine_fichier_feuilles(texte.replace("1 releve", "2 releve").encode())
+        check("un fichier de feuilles hors d'ordre est refuse", False)
+    except ValueError:
+        check("un fichier de feuilles hors d'ordre est refuse", True)
 
     return ok_total
+
+
+def _racine_par_niveaux(feuilles: list) -> bytes:
+    """Seconde façon de calculer la même racine : on assemble les paires niveau par niveau."""
+    h = list(feuilles)
+    while len(h) > 1:
+        h = [noeud(h[i], h[i + 1]) if i + 1 < len(h) else h[i] for i in range(0, len(h), 2)]
+    return h[0]
+
+
+def racine_fichier_feuilles(octets: bytes):
+    """(racine, en-tête) d'un fichier feuilles-AAAA-MM-JJ.txt(.gz). Positions contrôlées une à une ; le nombre de
+    feuilles annoncé doit être le nombre lu. ValueError sinon."""
+    if octets[:2] == b"\x1f\x8b":
+        octets = gzip.decompress(octets)
+    lignes = octets.decode("ascii").splitlines()
+    if len(lignes) < 5 or lignes[0] != "adn-scelyans-feuilles/1":
+        raise ValueError("ce n'est pas un fichier de feuilles ADN")
+    tete = dict(l.split(" ", 1) for l in lignes[1:4])
+    feuilles = []
+    for k, l in enumerate(lignes[4:]):
+        m = re.fullmatch(r"(\d+) [a-z]+(?: [a-z0-9]+)? ([0-9a-f]{64})", l)
+        if not m or int(m.group(1)) != k:
+            raise ValueError(f"ligne {k + 5} illisible ou hors d'ordre")
+        feuilles.append(bytes.fromhex(m.group(2)))
+    if int(tete.get("feuilles", -1)) != len(feuilles):
+        raise ValueError(f"{len(feuilles)} feuilles lues, {tete.get('feuilles')} annoncées")
+    return racine_merkle(feuilles), tete
 
 
 # ---------------------------------------------------------------------------
@@ -261,8 +310,31 @@ def main():
                          help="Calcule la racine de Merkle sur ces fichiers, dans l'ordre donné "
                               "(chaque fichier = une feuille).")
     parser.add_argument("--attendu", metavar="HEX",
-                         help="Racine attendue en hexadécimal, à comparer avec --racine.")
+                         help="Racine attendue en hexadécimal, à comparer avec --racine ou --feuilles.")
+    parser.add_argument("--feuilles", metavar="FICHIER",
+                         help="Fichier feuilles-AAAA-MM-JJ.txt.gz publié : recalcule la racine du jour.")
+    parser.add_argument("--adn", metavar="MAILLON",
+                         help="Maillon adn-AAAA-MM-JJ.json publié : sa racine est la valeur attendue.")
     args = parser.parse_args()
+
+    if args.feuilles:
+        with open(args.feuilles, "rb") as fh:
+            racine, tete = racine_fichier_feuilles(fh.read())
+        print(f"Racine calculee ({tete['feuilles']} feuilles, jour {tete.get('jour')}) : {racine.hex()}")
+        attendu = args.attendu
+        if args.adn:
+            with open(args.adn, encoding="utf-8") as fh:
+                maillon = json.load(fh)
+            if maillon.get("jour") != tete.get("jour"):
+                print("CONCLUSION : le maillon et le fichier de feuilles ne sont pas du même jour.")
+                sys.exit(2)
+            attendu = maillon.get("racine")
+        if attendu:
+            identique = racine == bytes.fromhex(attendu.strip().lower())
+            print("CONCLUSION : identique a la valeur attendue." if identique
+                  else "CONCLUSION : DIFFERENTE de la valeur attendue — ne pas faire confiance.")
+            sys.exit(0 if identique else 2)
+        sys.exit(0)
 
     if args.autotest:
         ok = autotest()
