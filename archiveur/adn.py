@@ -11,16 +11,19 @@ Feuilles du jour J, dans cet ordre (RFC 9162 : feuille = SHA-256(0x00 || donnée
           jour J (champ detecte_le ou note_le) ; « concerne » = jour touché (champ jour, heure ou racine de l'incident),
           par exemple constaté le 16/10, concerne le 09/10. Les journaux sont en ajout seul et ne sont jamais réécrits :
           la sélection ne change donc plus une fois le jour passé, et un jour déjà scellé n'est jamais refait ;
-  enfin   six « gènes » du jour, « adn/1 gene <nom> » + leur valeur en JSON canonique, recopiés dans le fichier ADN
+  enfin   sept « gènes » du jour, « adn/1 gene <nom> » + leur valeur en JSON canonique, recopiés dans le fichier ADN
           (clé « genes ») pour que la vérification les relise : code (empreintes SHA-256 de adn.py et archiveur.py),
           horloge (écart serveur / heure officielle, chrony ou timesyncd), bloc (dernier bloc Bitcoin avant minuit UTC
           de fin de journée), temoin (concordance Oracle / témoin Cloudflare), astra (tête du jour du registre de
           l'IA ASTRA-M, recopiée telle quelle : empreinte de son fichier du jour et dernier hash de sa chaîne), tours
           (incidents de la collecte du jour, recalculés depuis les relevés scellés : minutes sans aucun bloc écrit,
           minutes de cours écrites en retard, créneaux de 5 minutes sans lecture d'oracle ; la vérification le
-          recalcule). Un gène non disponible est une feuille « statut: indisponible » avec sa raison : l'ADN est
-          produit quand même. Les ADN scellés avant les gènes n'en ont pas (pas de clé « genes »), ceux scellés avant
-          le gène astra n'en ont que quatre, avant le gène tours que cinq : tous restent vérifiables tels quels.
+          recalcule), bce (taux de référence de la Banque centrale européenne publié le jour J : date de publication,
+          taux EUR/USD tel qu'écrit, empreinte du fichier XML quotidien conservé tel quel ; « sans_publication » le
+          week-end et les jours où la BCE ne publie pas : jamais le taux de la veille). Un gène non disponible est
+          une feuille « statut: indisponible » avec sa raison : l'ADN est produit quand même. Les ADN scellés avant
+          les gènes n'en ont pas (pas de clé « genes »), ceux scellés avant le gène astra n'en ont que quatre, avant
+          le gène tours que cinq, avant le gène bce que six : tous restent vérifiables tels quels.
 Fichiers créés une seule fois, jamais réécrits :
   adn/adn-AAAA-MM-JJ.json            racine, racine de la veille, nombre de feuilles par type, méthode ; aucun prix,
                                      aucune donnée personnelle : c'est le seul fichier destiné à être publié ;
@@ -29,6 +32,9 @@ Fichiers créés une seule fois, jamais réécrits :
                                      <type> <empreinte> », type releve suivi de l'heure UTC d'écriture) : un tiers
                                      recalcule la racine sans aucun relevé ni prix (commande « verifier-feuilles »).
                                      Créé seulement s'il redonne exactement la racine de l'ADN ; publiable.
+  bce/bce-AAAA-MM-JJ.xml             publication quotidienne de la BCE, octets reçus tels quels (aucune donnée de
+                                     TRACKYZZ). Lue au passage horaire les jours ouvrés après 15:00 UTC, sinon au
+                                     scellement du jour ; enregistrée seulement sous la date qu'elle porte.
 Une preuve d'inclusion (commande « preuve ») contient le relevé lui-même, donc des prix : elle n'est jamais publiée,
 seulement remise à qui en a besoin.
 
@@ -39,6 +45,7 @@ seulement remise à qui en a besoin.
     python3 adn.py verifier-feuilles --feuilles feuilles-2026-10-15.txt.gz --adn adn-2026-10-15.json [--empreinte 2026-10-15.txt]
 """
 import argparse, configparser, gzip, json, re, subprocess, sys, time, urllib.error, urllib.request
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import archiveur as ar
@@ -52,7 +59,7 @@ ALGORITHME = "RFC 9162 SHA-256 (feuille 0x00 || donnees, noeud 0x01 || gauche ||
 P_VEILLE, P_EMPREINTE, P_RELEVE, P_INCIDENT = (b"adn/1 veille ", b"adn/1 empreinte\n", b"adn/1 releve\n",
                                                b"adn/1 incident\n")
 P_GENE = b"adn/1 gene "                     # + nom + « \n » + valeur JSON canonique
-NOMS_GENES = ("code", "horloge", "bloc", "temoin", "astra", "tours")
+NOMS_GENES = ("code", "horloge", "bloc", "temoin", "astra", "tours", "bce")   # un nouveau gène toujours à la fin
 SEUIL_RETARD_S = 180             # comme TRACKYZZ (RETARD_MAX_S) : une minute écrite plus tard a été rattrapée
 PERIODE_ORACLES_S = 300          # une lecture d'oracles attendue par créneau de 5 minutes
 TAILLE_MAX_TETE_ASTRA = 4096                 # une tête fait 3 lignes ; au-delà, ce n'est pas une tête
@@ -60,6 +67,12 @@ API_BLOC = "https://mempool.space/api"      # publique, gratuite, sans clé
 REGLE_BLOC = "bloc de plus grande hauteur dont l'horodatage est strictement avant minuit UTC de fin du jour"
 ATTENTE_EMPREINTE_S = 6 * 3600   # empreinte TRACKYZZ du jour toujours absente 6 h après minuit : incident, une fois
 ATTENTE_ASTRA_S = 9 * 3600       # tête ASTRA publiée par le PC à 08:05 Paris : au-delà de 9 h, scellé sans elle
+URL_BCE = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"   # source unique, officielle
+VERSION_BCE = "bce/1"
+HEURE_BCE_UTC_S = 15 * 3600      # publiée vers 16:00 Paris (15:00 UTC en hiver, 14:00 en été)
+DELAI_BCE_S = 10                 # par essai : le passage horaire reste court même si la BCE ne répond pas
+ESSAIS_BCE = 3
+TAILLE_MAX_BCE = 65536           # le fichier quotidien fait environ 1,5 Ko
 ar.LIBELLES.setdefault("adn_empreinte_absente", "ADN : empreinte TRACKYZZ du jour absente")
 ar.LIBELLES.setdefault("adn_verification_en_echec", "ADN : vérification en échec")
 ar.LIBELLES.setdefault("adn_feuilles_incoherentes", "ADN : empreintes des feuilles ne redonnent pas la racine")
@@ -83,6 +96,10 @@ def fichier_adn(dest, jour_str):
 
 def fichier_feuilles(dest, jour_str):
     return dest / "adn" / f"feuilles-{jour_str}.txt.gz"
+
+
+def fichier_bce(dest, jour_str):
+    return dest / "bce" / f"bce-{jour_str}.xml"
 
 
 def veille_de(jour_str):
@@ -272,9 +289,118 @@ def gene_tours(conf, jour_str, releves=None):
         return indisponible(f"relevés du jour illisibles : {type(e).__name__}")
 
 
+def lire_bce(url=URL_BCE, essais=ESSAIS_BCE):
+    """Octets bruts de la publication quotidienne de la BCE : quelques essais courts (DELAI_BCE_S chacun)."""
+    derniere = None
+    for k in range(essais):
+        if k:
+            time.sleep(2)
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "adn-scelyans/1"}),
+                                        timeout=DELAI_BCE_S) as r:
+                b = r.read(TAILLE_MAX_BCE + 1)
+            if len(b) > TAILLE_MAX_BCE:
+                raise ValueError("réponse BCE trop grande")
+            return b
+        except Exception as e:
+            derniere = e
+    raise derniere
+
+
+def analyser_bce(b):
+    """(date de publication, {devise: taux tel qu'écrit}) d'un fichier quotidien de la BCE ; ValueError sinon."""
+    if len(b) > TAILLE_MAX_BCE or b"<!DOCTYPE" in b.upper() or b"<!ENTITY" in b.upper():
+        raise ValueError("fichier BCE refusé (taille ou DOCTYPE)")
+    try:
+        jours = [e for e in ET.fromstring(b).iter() if e.tag.endswith("Cube") and "time" in e.attrib]
+    except ET.ParseError as e:
+        raise ValueError(f"XML BCE illisible : {e}")
+    if len(jours) != 1 or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", jours[0].get("time")):
+        raise ValueError("date de publication BCE introuvable")
+    taux = {c.get("currency"): c.get("rate") for c in jours[0] if c.get("currency")}
+    if not re.fullmatch(r"\d+(\.\d+)?", taux.get("USD") or ""):
+        raise ValueError("taux EUR/USD introuvable")
+    return jours[0].get("time"), taux
+
+
+def week_end(jour_str):
+    return time.gmtime(ar.secondes(jour_str + "T00:00:00Z")).tm_wday >= 5
+
+
+def conserver_bce(dest, b, journal, au_plus_tard):
+    """Enregistre une fois le fichier reçu, tel quel, sous la date qu'il porte (jamais une date postérieure à
+    au_plus_tard). Renvoie cette date."""
+    d, _ = analyser_bce(b)
+    if d > au_plus_tard:
+        raise ValueError(f"publication BCE datée du {d}, après le {au_plus_tard}")
+    if not fichier_bce(dest, d).exists():
+        ar.creer_une_fois(fichier_bce(dest, d), b, journal)
+    return d
+
+
+def recuperer_bce(conf, now_s, journal, lire=None):
+    """Passage horaire : les jours ouvrés après HEURE_BCE_UTC_S, tant que le fichier du jour manque, lit la
+    publication quotidienne et la conserve. Renvoie la date lue, l'erreur, ou None (rien à faire). Une panne
+    n'arrête jamais le passage : retenté au passage suivant, puis une dernière fois au scellement du jour."""
+    j = ar.jour_de(now_s)
+    if week_end(j) or now_s % 86400 < HEURE_BCE_UTC_S or fichier_bce(conf["destination"], j).exists():
+        return None
+    try:
+        return conserver_bce(conf["destination"], (lire or lire_bce)(), journal, j)
+    except Exception as e:
+        return f"{type(e).__name__} {str(e)[:100]}"
+
+
+def gene_bce(conf, jour_str, now_s, lire=None):
+    """Taux de référence BCE publié le jour J, depuis le fichier conservé ; s'il manque, une dernière lecture.
+    Week-end, ou fichier quotidien encore daté d'avant J (jour sans publication) : « sans_publication », sans taux.
+    Jamais le taux de la veille, jamais d'estimation."""
+    dest = conf["destination"]
+    try:
+        p = fichier_bce(dest, jour_str)
+        if not p.exists():
+            if week_end(jour_str):
+                return {"statut": "sans_publication", "version": VERSION_BCE, "raison": "week-end : la BCE ne publie pas"}
+            try:
+                b = (lire or lire_bce)()
+            except Exception as e:
+                return indisponible(f"échec réseau BCE : {type(e).__name__}")
+            d = conserver_bce(dest, b, ar.Journal(dest, conf.get("ntfy_url"), now_s), jour_str)
+            if d < jour_str:
+                return {"statut": "sans_publication", "version": VERSION_BCE,
+                        "raison": f"aucune publication BCE datée de ce jour (dernière : {d})"}
+        b = p.read_bytes()
+        d, taux = analyser_bce(b)
+        if d != jour_str:
+            raise ValueError("date différente du nom du fichier")
+        return {"statut": "mesure", "version": VERSION_BCE, "source": URL_BCE, "date_publication": d,
+                "fichier": f"bce/{p.name}", "fichier_sha256": ar.sha256_octets(b), "eur_usd": taux["USD"],
+                "conserve_le": ar.iso(p.stat().st_mtime)}
+    except Exception as e:
+        return indisponible(f"publication BCE illisible : {type(e).__name__} {str(e)[:100]}")
+
+
+def probleme_bce(dest, g):
+    """None si le fichier BCE conservé redonne le gène bce scellé (empreinte, date, taux) ; sinon le problème."""
+    p = fichier_bce(dest, g.get("date_publication", ""))
+    if not p.exists():
+        return "fichier BCE conservé introuvable"
+    b = p.read_bytes()
+    if ar.sha256_octets(b) != g.get("fichier_sha256"):
+        return "fichier BCE modifié (empreinte différente du gène bce)"
+    try:
+        d, taux = analyser_bce(b)
+    except ValueError:
+        return "fichier BCE illisible"
+    if (d, taux["USD"]) != (g.get("date_publication"), g.get("eur_usd")):
+        return "fichier BCE différent du gène bce (date ou taux)"
+    return None
+
+
 def mesurer_genes(conf, jour_str, now_s):
     return {"code": gene_code(), "horloge": gene_horloge(now_s), "bloc": gene_bloc(jour_str),
-            "temoin": gene_temoin(conf, jour_str), "astra": gene_astra(conf, jour_str), "tours": gene_tours(conf, jour_str)}
+            "temoin": gene_temoin(conf, jour_str), "astra": gene_astra(conf, jour_str), "tours": gene_tours(conf, jour_str),
+            "bce": gene_bce(conf, jour_str, now_s)}
 
 
 def noms_genes(genes):
@@ -389,6 +515,7 @@ def executer(conf, now_s=None, horo=None, genes=None):
     dest = conf["destination"]
     horo = horo or ar.Horodateurs(conf.get("ots"), None, conf.get("openssl") or "openssl")
     journal = ar.Journal(dest, conf.get("ntfy_url"), now_s)
+    bce = recuperer_bce(conf, now_s, journal)
     debut = premier_jour(conf)
     construits = []
     if debut:
@@ -416,7 +543,7 @@ def executer(conf, now_s=None, horo=None, genes=None):
                 ar.creer_une_fois(p, contenu_adn(conf, j, veille, *r, g), journal)
                 construits.append(j)
             j_s += 86400
-    return {"adn_construits": construits, "feuilles_publiees": ecrire_feuilles(conf, journal),
+    return {"adn_construits": construits, "bce": bce, "feuilles_publiees": ecrire_feuilles(conf, journal),
             "ancrage": ancrer(dest, now_s, horo, journal), "incidents": [i["type"] for i in journal.incidents]}
 
 
@@ -538,6 +665,8 @@ def verifier(conf):
         elif (g and g.get("tours", {}).get("statut") == "mesure"         # « indisponible » n'affirme rien
               and g["tours"] != gene_tours(conf, j, r[1]["releves_lignes"])):
             problemes.append(f"{p.name} : gène tours différent du recalcul depuis les relevés")
+        elif g and g.get("bce", {}).get("statut") == "mesure" and probleme_bce(dest, g["bce"]):
+            problemes.append(f"{p.name} : {probleme_bce(dest, g['bce'])}")
         elif fichier_feuilles(dest, j).exists() and (gzip.decompress(fichier_feuilles(dest, j).read_bytes())
                                                       != texte_feuilles(conf, a)):
             problemes.append(f"{fichier_feuilles(dest, j).name} : différent des feuilles recalculées")

@@ -31,11 +31,27 @@ def faux_genes(conf, jour, now_s):
                       "dernier_hash": "83" * 32}}
 
 
+def xml_bce(jour, usd="1.0832"):
+    """Publication quotidienne de la BCE, au format réel de eurofxref-daily.xml."""
+    return ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<gesmes:Envelope xmlns:gesmes="http://www.gesmes.org/xml/2002-08-01" '
+            'xmlns="http://www.ecb.int/vocabulary/2002-08-01/eurofxref">\n'
+            "\t<gesmes:subject>Reference rates</gesmes:subject>\n"
+            "\t<gesmes:Sender>\n\t\t<gesmes:name>European Central Bank</gesmes:name>\n\t</gesmes:Sender>\n"
+            f"\t<Cube>\n\t\t<Cube time='{jour}'>\n\t\t\t<Cube currency='USD' rate='{usd}'/>\n"
+            "\t\t\t<Cube currency='JPY' rate='164.12'/>\n\t\t</Cube>\n\t</Cube>\n</gesmes:Envelope>\n").encode()
+
+
+def bce_hors_ligne(*a, **k):
+    raise adn.urllib.error.URLError("hors ligne (test)")
+
+
 class TestADN(unittest.TestCase):
     def setUp(self):
-        patch = unittest.mock.patch.object(adn, "mesurer_genes", faux_genes)   # jamais de réseau ni de commande système
-        patch.start()
-        self.addCleanup(patch.stop)
+        for nom, faux in (("mesurer_genes", faux_genes), ("lire_bce", bce_hors_ligne)):   # jamais de réseau
+            patch = unittest.mock.patch.object(adn, nom, faux)                           # ni de commande système
+            patch.start()
+            self.addCleanup(patch.stop)
         self.tmp = tempfile.mkdtemp()
         self.src = Source(Path(self.tmp) / "trackyzz")
         (self.src.d / "empreintes").mkdir()
@@ -425,12 +441,13 @@ class TestGeneTours(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(adn.gene_tours({"destination": Path(d)}, J1)["statut"], "indisponible")
 
-    def test_mesurer_genes_contient_tours(self):
+    def test_mesurer_genes_contient_tours_et_bce(self):
         with tempfile.TemporaryDirectory() as d, \
                 unittest.mock.patch.object(adn, "gene_bloc", lambda j: adn.indisponible("test")), \
-                unittest.mock.patch.object(adn, "gene_horloge", lambda n: adn.indisponible("test")):
+                unittest.mock.patch.object(adn, "gene_horloge", lambda n: adn.indisponible("test")), \
+                unittest.mock.patch.object(adn, "lire_bce", bce_hors_ligne):
             g = adn.mesurer_genes({"destination": Path(d)}, J1, T1)
-        self.assertEqual(adn.noms_genes(g), ["code", "horloge", "bloc", "temoin", "astra", "tours"])
+        self.assertEqual(adn.noms_genes(g), ["code", "horloge", "bloc", "temoin", "astra", "tours", "bce"])
 
 
 class TestGenesDansADN(TestADN):
@@ -552,6 +569,130 @@ class TestGenesDansADN(TestADN):
         fin = self.jours(J1, empreinte=False)
         adn.executer(self.conf, now_s=fin, horo=FauxHorodateurs(), genes=lambda *a: appels.append(a))
         self.assertEqual(appels, [])
+
+
+J_SAMEDI = "2026-10-17"
+assert adn.week_end(J_SAMEDI) and not adn.week_end(J1) and not adn.week_end(J2)
+
+
+def jamais_lu(*a, **k):
+    raise AssertionError("la BCE ne doit pas être interrogée")
+
+
+class TestGeneBce(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, onerror=_rendre_modifiable)
+        self.dest = Path(self.tmp)
+        self.conf = {"destination": self.dest, "ntfy_url": None}
+
+    def test_jour_normal_fichier_conserve_tel_quel(self):
+        b = xml_bce(J1)
+        g = adn.gene_bce(self.conf, J1, T1 + 86400 + 900, lire=lambda: b)
+        self.assertEqual((g["statut"], g["version"], g["date_publication"], g["eur_usd"]), ("mesure", "bce/1", J1, "1.0832"))
+        self.assertEqual(adn.fichier_bce(self.dest, J1).read_bytes(), b)                   # octets bruts
+        self.assertEqual(g["fichier_sha256"], hashlib.sha256(b).hexdigest())
+        self.assertEqual((g["fichier"], g["source"]), (f"bce/bce-{J1}.xml", adn.URL_BCE))
+        self.assertEqual(adn.gene_bce(self.conf, J1, T1 + 86400 + 900, lire=jamais_lu), g)   # déjà conservé : relu
+
+    def test_week_end_sans_publication_ni_lecture(self):
+        g = adn.gene_bce(self.conf, J_SAMEDI, T1 + 3 * 86400, lire=jamais_lu)
+        self.assertEqual(g, {"statut": "sans_publication", "version": "bce/1", "raison": "week-end : la BCE ne publie pas"})
+        self.assertFalse((self.dest / "bce").exists())
+
+    def test_jour_ferie_jamais_le_taux_de_la_veille(self):
+        g = adn.gene_bce(self.conf, J2, T1 + 2 * 86400, lire=lambda: xml_bce(J1))    # le fichier du jour est encore J1
+        self.assertEqual(g["statut"], "sans_publication")
+        self.assertIn(f"dernière : {J1}", g["raison"])
+        self.assertNotIn("eur_usd", g)
+        self.assertFalse(adn.fichier_bce(self.dest, J2).exists())
+        self.assertEqual(adn.fichier_bce(self.dest, J1).read_bytes(), xml_bce(J1))   # gardé sous sa propre date
+
+    def test_echec_reseau(self):
+        g = adn.gene_bce(self.conf, J1, T1 + 86400 + 900, lire=bce_hors_ligne)
+        self.assertEqual((g["statut"], g["raison"]), ("indisponible", "échec réseau BCE : URLError"))
+        self.assertFalse((self.dest / "bce").exists())
+
+    def test_jamais_enregistre_sous_une_mauvaise_date(self):
+        g = adn.gene_bce(self.conf, J1, T1 + 2 * 86400, lire=lambda: xml_bce(J2))    # déjà la publication du lendemain
+        self.assertEqual(g["statut"], "indisponible")
+        self.assertFalse((self.dest / "bce").exists())
+
+    def test_fichiers_refuses(self):
+        for faux in (b"<!DOCTYPE x [<!ENTITY a 'b'>]>" + xml_bce(J1), xml_bce(J1).replace(b"USD", b"GBP"),
+                     xml_bce(J1).replace(b"1.0832", b"un"), b"pas du xml", xml_bce(J1) * 2, b" " * 70000 + xml_bce(J1)):
+            with self.assertRaises(ValueError):
+                adn.analyser_bce(faux)
+            self.assertEqual(adn.gene_bce(self.conf, J1, T1, lire=lambda: faux)["statut"], "indisponible")
+        self.assertFalse((self.dest / "bce").exists())
+
+    def test_recuperation_horaire_apres_la_publication(self):
+        vues = []
+        lire = lambda: vues.append(1) or xml_bce(J1)
+        journal = ar.Journal(self.dest)
+        self.assertIsNone(adn.recuperer_bce(self.conf, T1 + 14 * 3600 + 3000, journal, lire))   # 14:50 UTC : trop tôt
+        self.assertEqual(adn.recuperer_bce(self.conf, T1 + 15 * 3600 + 3000, journal, lire), J1)
+        self.assertIsNone(adn.recuperer_bce(self.conf, T1 + 16 * 3600 + 3000, journal, lire))   # déjà conservé
+        self.assertEqual(len(vues), 1)                                                           # une lecture par jour
+        self.assertIsNone(adn.recuperer_bce(self.conf, T1 + 2 * 86400 + 16 * 3600, journal, jamais_lu))   # samedi
+        self.assertIn("URLError", adn.recuperer_bce(self.conf, T1 + 86400 + 16 * 3600, journal, bce_hors_ligne))
+        pas_encore = adn.recuperer_bce(self.conf, T1 + 86400 + 15 * 3600 + 3000, journal, lambda: xml_bce(J1))
+        self.assertEqual(pas_encore, J1)                                    # BCE en retard : rien sous la date de J2
+        self.assertFalse(adn.fichier_bce(self.dest, J2).exists())
+
+    def test_essais_courts(self):
+        delais = []
+        def ouvrir(req, timeout):
+            delais.append(timeout)
+            raise adn.urllib.error.URLError("hors ligne (test)")
+        with unittest.mock.patch.object(adn.urllib.request, "urlopen", ouvrir), \
+                unittest.mock.patch.object(adn.time, "sleep", lambda s: None):
+            with self.assertRaises(adn.urllib.error.URLError):
+                adn.lire_bce()
+        self.assertEqual(delais, [10, 10, 10])                              # 10 s au plus par essai
+
+
+class TestGeneBceDansADN(TestADN):
+    def avec_bce(self, conf, j, n):
+        return {**faux_genes(conf, j, n), "tours": adn.gene_tours(conf, j), "bce": adn.gene_bce(conf, j, n)}
+
+    def test_jour_normal_scelle_et_verifie_puis_fichier_modifie_detecte(self):
+        fin = self.jours(J1)
+        with unittest.mock.patch.object(adn, "lire_bce", lambda: xml_bce(J1)):
+            adn.executer(self.conf, now_s=fin, horo=FauxHorodateurs(), genes=self.avec_bce)
+        a = self.lire(J1)
+        self.assertEqual((a["genes"]["bce"]["eur_usd"], a["feuilles"]["genes"]), ("1.0832", 7))
+        self.assertIn("tours, bce :", a["ordre_feuilles"])
+        self.assertTrue(adn.fichier_feuilles(self.dest, J1).exists())
+        self.assertEqual(adn.verifier(self.conf), (1, []))
+        p = adn.fichier_bce(self.dest, J1)
+        p.chmod(0o666)
+        p.write_bytes(xml_bce(J1, usd="1.0833"))
+        self.assertEqual(adn.verifier(self.conf)[1], [f"adn-{J1}.json : fichier BCE modifié (empreinte différente du gène bce)"])
+        p.unlink()
+        self.assertEqual(adn.verifier(self.conf)[1], [f"adn-{J1}.json : fichier BCE conservé introuvable"])
+
+    def test_echec_reseau_adn_scelle_quand_meme(self):
+        fin = self.jours(J1)
+        r = adn.executer(self.conf, now_s=fin, horo=FauxHorodateurs(), genes=self.avec_bce)
+        self.assertEqual(r["adn_construits"], [J1])
+        self.assertEqual(self.lire(J1)["genes"]["bce"]["statut"], "indisponible")
+        self.assertEqual(adn.verifier(self.conf), (1, []))
+
+    def test_adn_scelle_avant_le_gene_bce_reste_valide(self):
+        avec_tours = lambda c, j, n: {**faux_genes(c, j, n), "tours": adn.gene_tours(c, j)}   # comme le 28/10/2026
+        fin = self.jours(J1, J2)
+        adn.executer(self.conf, now_s=T1 + 86400 + 900, horo=FauxHorodateurs(), genes=avec_tours)
+        avant = adn.fichier_adn(self.dest, J1).read_bytes()
+        a = self.lire(J1)
+        self.assertNotIn("bce", a["genes"])
+        self.assertTrue(a["ordre_feuilles"].endswith("(code, horloge, bloc, temoin, astra, tours : « adn/1 gene <nom> » "
+                                                      "puis la valeur JSON canonique)"))     # texte d'avant, inchangé
+        with unittest.mock.patch.object(adn, "lire_bce", lambda: xml_bce(J2)):
+            adn.executer(self.conf, now_s=fin, horo=FauxHorodateurs(), genes=self.avec_bce)
+        self.assertEqual(self.lire(J2)["genes"]["bce"]["statut"], "mesure")
+        self.assertEqual(adn.verifier(self.conf), (2, []))
+        self.assertEqual(adn.fichier_adn(self.dest, J1).read_bytes(), avant)
 
 
 def racine_depuis_empreintes(h):

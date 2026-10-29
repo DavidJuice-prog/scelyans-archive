@@ -43,8 +43,9 @@ Une feuille par élément, dans cet ordre (voir adn.py) :
      plus les cours et les oracles) : environ 21 000 feuilles par jour
      complet — et non 24 « relevés horaires » ;
   4. les incidents constatés ce jour-là,
-  5. les gènes du jour : code, horloge, bloc, témoin, astra, et tours
-     (incidents de la collecte, depuis le 28/10/2026).
+  5. les gènes du jour : code, horloge, bloc, témoin, astra, tours
+     (incidents de la collecte, depuis le 28/10/2026), et bce (taux de
+     référence de la Banque centrale européenne).
 Les relevés contiennent des prix : ils ne sont pas publiés. Ce qui est
 publié, c'est feuilles-AAAA-MM-JJ.txt.gz : l'empreinte SHA-256 de chaque
 feuille, une par ligne (« <position> <type> <empreinte> »). Ce script en

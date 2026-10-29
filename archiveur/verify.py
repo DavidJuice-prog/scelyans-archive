@@ -9,9 +9,9 @@ sur parole.
 
 Usage :
     python verify.py adn-2026-10-24.json [adn-2026-10-24.json.bitcoin.ots] [adn-2026-10-23.json]
-                     [--feuilles feuilles-2026-10-24.txt.gz] [--trackyzz DOSSIER]
+                     [--feuilles feuilles-2026-10-24.txt.gz] [--bce bce-2026-10-24.xml] [--trackyzz DOSSIER]
 
-Sans fichier .ots, veille ou feuilles en argument, le script les cherche à côté du maillon ; la veille est ensuite
+Sans fichier .ots, veille, feuilles ou BCE en argument, le script les cherche à côté du maillon ; la veille est ensuite
 cherchée sur trackyzz.com. Couleurs : actives dans la console Windows 10+ et les terminaux ; jamais dans un fichier
 (ou avec la variable NO_COLOR).
 
@@ -75,6 +75,15 @@ Ce que ce script vérifie, et comment :
    feuilles qu'il peut reconstruire seul : veille (depuis racine_veille)
    et gènes (depuis les valeurs publiées dans le maillon).
 
+8. Gène bce (taux de référence de la Banque centrale européenne)
+   Si le fichier bce-AAAA-MM-JJ.xml est fourni ou à côté du maillon : son
+   empreinte SHA-256, sa date et son taux EUR/USD doivent être ceux du gène
+   (sinon ECHEC). Absent : ATTENTION. Le taux est ensuite recoupé avec le
+   fichier historique publié par la BCE (eurofxref-hist.xml) : un écart ou
+   une absence de réponse n'est qu'une ATTENTION, jamais un ECHEC. Les jours
+   sans publication (week-end, jours fériés BCE) n'ont pas de taux. Les
+   maillons scellés avant ce gène n'en ont pas.
+
 Ce que ce script ne fait PAS (honnêteté sur les limites actuelles) :
    - Il ne relit pas les relevés eux-mêmes (ils contiennent des prix et ne
      sont pas publiés) : il vérifie que la racine scellée est bien celle de
@@ -118,7 +127,10 @@ CHAMPS_ATTENDUS = [
 ]
 
 GENES_ATTENDUS = ["astra", "bloc", "code", "horloge", "temoin"]
-GENES_FACULTATIFS = ["tours"]          # absent des maillons scellés avant le 28/10/2026
+GENES_FACULTATIFS = ["tours", "bce"]   # absents des maillons scellés avant eux (tours : 28/10/2026)
+
+# Fichier historique officiel de la BCE, pour recouper le taux du gène bce (ATTENTION seulement).
+BCE_HIST_URL = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-hist.xml"
 
 # Maillons publiés (pour retrouver celui de la veille).
 ADN_URL = "https://trackyzz.com/adn/adn-{jour}.json"
@@ -574,7 +586,7 @@ def verifier_feuilles(d, feuilles_path):
     info(f"{len(h)} feuilles ({f.get('releves')} relevés, soit environ 21 000 par jour complet)")
     tout_ok = True
     genes = d.get("genes") or {}
-    noms = [n for n in ["code", "horloge", "bloc", "temoin", "astra", "tours"] if n in genes]
+    noms = [n for n in ["code", "horloge", "bloc", "temoin", "astra", "tours", "bce"] if n in genes]
     attendu = (["veille", "empreinte"] + ["releve"] * f.get("releves", -1) + ["incident"] * f.get("incidents", -1)
                + [f"gene {n}" for n in noms])
     if [t[:6] if t.startswith("releve") else t for t in types] != attendu:
@@ -598,6 +610,79 @@ def verifier_feuilles(d, feuilles_path):
     return tout_ok
 
 
+def lire_bce(b):
+    """(date, taux EUR/USD tel qu'écrit) d'un fichier quotidien de la BCE. ValueError s'il n'en est pas un."""
+    import xml.etree.ElementTree as ET
+    if len(b) > 65536 or b"<!DOCTYPE" in b.upper() or b"<!ENTITY" in b.upper():
+        raise ValueError("fichier refusé (taille ou DOCTYPE)")
+    try:
+        jours = [e for e in ET.fromstring(b).iter() if e.tag.endswith("Cube") and "time" in e.attrib]
+    except ET.ParseError as e:
+        raise ValueError(str(e))
+    if len(jours) != 1:
+        raise ValueError("pas exactement une date de publication")
+    usd = [c.get("rate") for c in jours[0] if c.get("currency") == "USD"]
+    if len(usd) != 1:
+        raise ValueError("taux EUR/USD absent")
+    return jours[0].get("time"), usd[0]
+
+
+def verifier_gene_bce(d, bce_path):
+    section("8. Gène bce (taux de référence de la Banque centrale européenne)")
+    g = d.get("genes", {}).get("bce")
+    if not g:
+        warn("aucun gène bce : maillon scellé avant ce gène, étape sautée")
+        return None
+    if g.get("statut") == "sans_publication":
+        ok(f"aucun taux ce jour-là, noté comme tel : {g.get('raison')}")
+        return True
+    if g.get("statut") != "mesure":
+        warn(f"gène bce non mesuré ce jour-là : {g.get('raison')}")
+        return None
+    jour, taux = g.get("date_publication"), g.get("eur_usd")
+    info(f"publication BCE du {jour} : 1 EUR = {taux} USD")
+    if jour != d.get("jour"):
+        fail(f"date de publication ({jour}) différente du jour scellé ({d.get('jour')})")
+        return False
+    resultat = True
+    if not bce_path:
+        warn(f"fichier bce-{jour}.xml non fourni ni à côté du maillon : empreinte non vérifiable ici")
+        resultat = None
+    else:
+        try:
+            b = Path(bce_path).read_bytes()
+        except OSError as e:
+            fail(f"fichier BCE illisible ({type(e).__name__})")
+            return False
+        if hashlib.sha256(b).hexdigest() != g.get("fichier_sha256"):
+            fail("empreinte du fichier BCE différente de celle du gène : fichier modifié")
+            return False
+        try:
+            lu = lire_bce(b)
+        except ValueError as e:
+            fail(f"fichier BCE illisible ({e})")
+            return False
+        if lu != (jour, taux):
+            fail(f"le fichier BCE indique {lu[1]} USD le {lu[0]}, le gène {taux} USD le {jour}")
+            return False
+        ok("empreinte, date et taux du fichier BCE conservé identiques au gène")
+    try:
+        hist = http_get_json(BCE_HIST_URL, timeout=30)
+        m = re.search(r"<Cube time=['\"]" + re.escape(jour) + r"['\"]>(.*?)</Cube>", hist, re.S)
+        m = m and re.search(r"currency=['\"]USD['\"] rate=['\"]([0-9.]+)['\"]", m.group(1))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+        warn(f"historique BCE injoignable ({e}) : taux non recoupé")
+        return resultat
+    if not m:
+        warn(f"aucun taux EUR/USD du {jour} dans l'historique BCE : à vérifier à la main")
+        return None
+    if float(m.group(1)) != float(taux):
+        warn(f"l'historique BCE donne {m.group(1)} USD le {jour}, le gène {taux} : à vérifier à la main")
+        return None
+    ok(f"taux confirmé par l'historique publié par la BCE ({BCE_HIST_URL})")
+    return resultat
+
+
 def main(argv=None):
     import argparse
     global COULEURS
@@ -611,6 +696,7 @@ def main(argv=None):
     p.add_argument("ots", nargs="?")
     p.add_argument("veille", nargs="?")
     p.add_argument("--feuilles")
+    p.add_argument("--bce", help="fichier bce-AAAA-MM-JJ.xml conservé (sinon cherché à côté du maillon)")
     p.add_argument("--trackyzz", help="dossier TRACKYZZ (app\\ancrage.py et .venv) pour lire les .ots sans installation")
     a = p.parse_args(argv)
 
@@ -624,6 +710,10 @@ def main(argv=None):
     if not feuilles_path:
         voisin = Path(maillon_path).with_name(f"feuilles-{d.get('jour')}.txt.gz")
         feuilles_path = str(voisin) if voisin.exists() else None
+    bce_path = a.bce
+    if not bce_path:
+        voisin = Path(maillon_path).with_name(f"bce-{d.get('jour')}.xml")
+        bce_path = str(voisin) if voisin.exists() else None
 
     resultats = {}
     resultats["structure"] = verifier_structure(d)
@@ -633,6 +723,7 @@ def main(argv=None):
     resultats["continuite"] = verifier_continuite(d, a.veille, maillon_path)
     resultats["tours"] = verifier_gene_tours(d)
     resultats["feuilles"] = verifier_feuilles(d, feuilles_path)
+    resultats["bce"] = verifier_gene_bce(d, bce_path)
 
     section("Résumé")
     for nom, statut in resultats.items():
@@ -643,7 +734,7 @@ def main(argv=None):
         else:
             warn(f"{nom} (non vérifiable avec les éléments fournis)")
 
-    if any(resultats[n] is False for n in ("structure", "bloc", "ots", "continuite", "tours", "feuilles")):
+    if any(resultats[n] is False for n in ("structure", "bloc", "ots", "continuite", "tours", "feuilles", "bce")):
         print("\nCONCLUSION : ce maillon présente des incohérences. Ne pas s'y fier sans investigation.")
         return 2
     print("\nCONCLUSION : aucune incohérence détectée sur les éléments vérifiables.")

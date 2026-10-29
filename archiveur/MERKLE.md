@@ -50,11 +50,12 @@ ce document le disait à tort).
 
 ### Les gènes
 
-Jusqu'à six gènes, toujours dans cet ordre : `code` (empreintes des
+Jusqu'à sept gènes, toujours dans cet ordre : `code` (empreintes des
 programmes), `horloge` (écart de l'horloge du serveur), `bloc` (dernier bloc
-Bitcoin avant minuit UTC), `temoin`, `astra`, et **`tours`** depuis le
-28/10/2026. Les maillons plus anciens ont 4 ou 5 gènes et restent valables
-tels quels.
+Bitcoin avant minuit UTC), `temoin`, `astra`, **`tours`** depuis le
+28/10/2026, et **`bce`** (taux de change de la Banque centrale européenne).
+Un nouveau gène s'ajoute toujours à la fin : les maillons plus anciens ont
+4, 5 ou 6 gènes et restent valables tels quels.
 
 Le gène `tours` décrit les **incidents de la collecte** du jour, recalculés
 depuis les relevés scellés : minutes sans aucun bloc écrit, minutes de cours
@@ -68,6 +69,38 @@ cachée. Exemple de valeur :
  "minutes_en_retard": 1, "plages_en_retard": ["12:57"], "retard_max_s": 200,
  "seuil_retard_s": 180, "oracles_perdus": 1, "creneaux_oracles_perdus": ["13:00"],
  "source": "releves scelles du jour"}
+```
+
+Le gène `bce` enregistre le **taux de change de référence officiel** de la
+Banque centrale européenne pour le jour scellé, afin de pouvoir plus tard
+convertir des cours en euros de façon vérifiable.
+
+- **D'où vient le taux** : d'une source unique, la publication quotidienne
+  de la BCE (`https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml`),
+  mise en ligne vers 16 h (heure de Paris) les jours ouvrés. Aucun autre site,
+  aucune estimation. Le fichier reçu est conservé tel quel, octet pour octet
+  (`bce-AAAA-MM-JJ.xml`), et le gène contient son empreinte SHA-256, la date
+  de publication indiquée par la BCE et le taux EUR/USD tel qu'il y est écrit.
+- **Jours sans taux** : le week-end et les jours où la BCE ne publie pas
+  (jours fériés), le gène vaut `sans_publication`, sans taux ; si la BCE n'a
+  pas pu être jointe, il vaut `indisponible`. Le taux de la veille n'est
+  **jamais** recopié.
+- **Ce qu'il prouve** : le fichier de la BCE conservé n'a pas changé depuis
+  le scellement, et il existait au plus tard au bloc Bitcoin de l'ancrage.
+- **Ce qu'il ne prouve pas** : la BCE ne signe pas son fichier ; l'empreinte
+  seule ne prouve donc pas qu'il vient d'elle. `verify.py` recoupe le taux
+  avec le fichier historique publié par la BCE (`eurofxref-hist.xml`) : un
+  écart y est signalé en ATTENTION, à vérifier à la main. C'est un taux de
+  **référence** de la BCE, publié une fois par jour, pas un cours de marché :
+  il ne dit rien des cours relevés par TRACKYZZ.
+
+Exemple de valeur :
+
+```json
+{"statut": "mesure", "version": "bce/1", "date_publication": "2026-10-29",
+ "eur_usd": "1.0832", "fichier": "bce/bce-2026-10-29.xml",
+ "fichier_sha256": "…", "conserve_le": "2026-10-29T15:50:03Z",
+ "source": "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"}
 ```
 
 ## Ce qui est publié
@@ -95,6 +128,10 @@ cachée. Exemple de valeur :
   (Ce jour-là, scellé avant le gène `tours`, la dernière feuille est le gène `astra`.)
 
 - Le fichier d'empreinte TRACKYZZ du jour (dépôt `trackyzz-empreintes`).
+
+Les fichiers BCE conservés (`bce-AAAA-MM-JJ.xml`) ne sont **pas encore**
+publiés : en attendant, `verify.py` signale leur empreinte en ATTENTION
+(non vérifiable), jamais en ECHEC.
 
 **Aucun relevé ni aucun prix n'est publié.** Une empreinte SHA-256 ne permet
 pas de retrouver la ligne hachée : chaque ligne contient, en plus des prix,
@@ -138,12 +175,12 @@ python3 merkle_independant.py --feuilles feuilles-2026-10-26.txt.gz --adn adn-20
 python3 adn.py verifier-feuilles --feuilles feuilles-2026-10-26.txt.gz --adn adn-2026-10-26.json \
         --empreinte 2026-10-26.txt
 
-# 3. Le vérificateur public complet : bloc Bitcoin, OpenTimestamps, code, veille, gène tours, feuilles
-python3 verify.py adn-2026-10-26.json --feuilles feuilles-2026-10-26.txt.gz
+# 3. Le vérificateur public complet : bloc Bitcoin, OpenTimestamps, code, veille, gène tours, feuilles, gène bce
+python3 verify.py adn-2026-10-26.json --feuilles feuilles-2026-10-26.txt.gz [--bce bce-2026-10-26.xml]
 ```
 
-`verify.py` cherche le `.bitcoin.ots`, le maillon de la veille et le
-fichier des feuilles à côté du maillon ; la veille est ensuite cherchée sur
+`verify.py` cherche le `.bitcoin.ots`, le maillon de la veille, le fichier
+des feuilles et le fichier BCE à côté du maillon ; la veille est ensuite cherchée sur
 trackyzz.com. Ce qu'il ne peut pas vérifier (pas d'internet, fichier
 absent) est affiché en ATTENTION, jamais en ECHEC ; seule une contradiction
 est un ECHEC. Pour OpenTimestamps, il utilise la bibliothèque

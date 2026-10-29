@@ -2,7 +2,7 @@
 
     python -m unittest -v test_verify
 """
-import contextlib, gzip, io, json, os, shutil, tempfile, unittest, unittest.mock, urllib.error
+import contextlib, gzip, hashlib, io, json, os, shutil, tempfile, unittest, unittest.mock, urllib.error
 from pathlib import Path
 
 import adn
@@ -129,6 +129,93 @@ class MaillonsReels(unittest.TestCase):
         code, out = lancer(m)
         self.assertEqual(code, 0)
         self.assertIn("premier maillon de la chaîne", out)
+
+    def test_maillon_scelle_avant_le_gene_bce_passe(self):
+        m = self.copie(f"adn-{J2}.json", f"adn-{J1}.json", f"feuilles-{J2}.txt.gz")
+        code, out = lancer(m)
+        self.assertEqual(code, 0, out)
+        self.assertIn("aucun gène bce : maillon scellé avant ce gène", out)
+        self.assertNotIn("[ECHEC]", out)
+
+
+class GeneBce(unittest.TestCase):
+    XML = test_adn.xml_bce(J1)
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.f = self.tmp / f"bce-{J1}.xml"
+        self.f.write_bytes(self.XML)
+        self.d = {"jour": J1, "genes": {"bce": {"statut": "mesure", "version": "bce/1", "date_publication": J1,
+                                                "eur_usd": "1.0832", "fichier": f"bce/bce-{J1}.xml",
+                                                "fichier_sha256": hashlib.sha256(self.XML).hexdigest()}}}
+
+    def statut(self, chemin, http=injoignable, d=None):
+        with unittest.mock.patch.object(verify, "http_get_json", http), contextlib.redirect_stdout(io.StringIO()) as s:
+            r = verify.verifier_gene_bce(d or self.d, chemin)
+        return r, s.getvalue()
+
+    def historique(self, usd):
+        hist = ("<gesmes:Envelope><Cube>"
+                f"<Cube time='2026-10-16'><Cube currency='USD' rate='1.0900'/></Cube>"
+                f"<Cube time='{J1}'><Cube currency='JPY' rate='164.12'/><Cube currency='USD' rate='{usd}'/></Cube>"
+                "</Cube></gesmes:Envelope>")
+        return lambda url, timeout=10: hist if url == verify.BCE_HIST_URL else injoignable(url)
+
+    def test_fichier_conserve_identique_hors_ligne(self):
+        r, out = self.statut(str(self.f))
+        self.assertIs(r, True, out)
+        self.assertIn("empreinte, date et taux du fichier BCE conservé identiques au gène", out)
+        self.assertIn("historique BCE injoignable", out)                  # ATTENTION, jamais ECHEC
+        self.assertNotIn("[ECHEC]", out)
+
+    def test_fichier_bce_modifie_echec(self):
+        self.f.write_bytes(self.XML.replace(b"1.0832", b"1.0833"))
+        r, out = self.statut(str(self.f))
+        self.assertIs(r, False)
+        self.assertIn("fichier modifié", out)
+
+    def test_fichier_absent_attention(self):
+        r, out = self.statut(None)
+        self.assertIsNone(r)
+        self.assertIn(f"fichier bce-{J1}.xml non fourni", out)
+        self.assertNotIn("[ECHEC]", out)
+
+    def test_recoupement_avec_l_historique_bce(self):
+        r, out = self.statut(str(self.f), self.historique("1.0832"))
+        self.assertIs(r, True, out)
+        self.assertIn("taux confirmé par l'historique publié par la BCE", out)
+        r, out = self.statut(str(self.f), self.historique("1.0999"))
+        self.assertIsNone(r)                                               # un écart : ATTENTION seulement
+        self.assertIn("l'historique BCE donne 1.0999 USD", out)
+        self.assertNotIn("[ECHEC]", out)
+
+    def test_sans_publication_indisponible_ou_absent(self):
+        jour_ferme = {"jour": J1, "genes": {"bce": {"statut": "sans_publication", "raison": "week-end"}}}
+        self.assertIs(self.statut(None, d=jour_ferme)[0], True)
+        self.assertIsNone(self.statut(None, d={"jour": J1, "genes": {"bce": {"statut": "indisponible"}}})[0])
+        self.assertIsNone(self.statut(None, d={"jour": J1, "genes": {}})[0])
+
+    def test_maillon_complet_avec_gene_bce(self):
+        """De bout en bout : maillon scellé par le vrai adn.py avec un gène bce, puis fichier modifié."""
+        f = test_adn.TestGeneBceDansADN()
+        f.setUp()
+        self.addCleanup(f.tearDown)
+        fin = f.jours(J1)
+        with unittest.mock.patch.object(adn, "lire_bce", lambda: self.XML):
+            adn.executer(f.conf, now_s=fin, horo=FauxHorodateurs(), genes=f.avec_bce)
+        for n in (f"adn-{J1}.json", f"feuilles-{J1}.txt.gz"):
+            shutil.copy(f.dest / "adn" / n, self.tmp / n)
+        os.chmod(self.f, 0o666)
+        m = str(self.tmp / f"adn-{J1}.json")
+        code, out = lancer(m)
+        self.assertEqual(code, 0, out)
+        self.assertIn("(+ tours, bce)", out)
+        self.assertIn("empreinte, date et taux du fichier BCE conservé identiques au gène", out)
+        self.f.write_bytes(self.XML.replace(b"JPY", b"GBP"))
+        code, out = lancer(m)
+        self.assertEqual(code, 2)
+        self.assertIn("fichier modifié", out)
 
 
 class GeneBloc(unittest.TestCase):
