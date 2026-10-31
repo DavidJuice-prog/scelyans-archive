@@ -12,6 +12,7 @@ Conçu pour tourner derrière nginx, en reverse-proxy sur /verifier.
 import io
 import os
 import sys
+import hashlib
 import html
 import re
 import tempfile
@@ -24,9 +25,9 @@ from flask import Flask, request, render_template_string
 # Le vérificateur réutilise le fichier verify.py tel que publié publiquement
 # sur https://github.com/DavidJuice-prog/scelyans-archive (archiveur/verify.py).
 # Ce fichier app.py vit dans le même dépôt, sous verifier-web/ ; verify.py est
-# donc son voisin direct, dans ../archiveur/ (voir DEPLOIEMENT.md). Ainsi, le
-# code qui vérifie réellement les certificats sur le site est identique, au
-# caractère près, à celui que n'importe qui peut auditer sur le dépôt public.
+# donc son voisin direct, dans ../archiveur/ (voir DEPLOIEMENT.md). La page
+# affiche l'empreinte SHA-256 du fichier réellement chargé : n'importe qui peut
+# la comparer à celle du fichier publié sur GitHub, même si ce serveur a du retard.
 _ICI = os.path.dirname(os.path.abspath(__file__))
 VERIFY_MODULE_DIR = os.environ.get(
     "SCELYANS_VERIFY_DIR",
@@ -34,6 +35,9 @@ VERIFY_MODULE_DIR = os.environ.get(
 )
 sys.path.insert(0, VERIFY_MODULE_DIR)
 import verify as V  # noqa: E402  (import après modification de sys.path, volontaire)
+
+with open(V.__file__, "rb") as _f:
+    EMPREINTE_VERIFY = hashlib.sha256(_f.read()).hexdigest()
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5 Mo largement suffisant pour un maillon + .ots
@@ -90,7 +94,7 @@ def executer_verification(maillon_path, ots_path, veille_path):
             resultats["bloc"] = V.verifier_gene_bloc(d)
             resultats["ots"] = V.verifier_opentimestamps(maillon_path, ots_path)
             resultats["code"] = V.verifier_gene_code(d)
-            resultats["continuite"] = V.verifier_continuite(d, veille_path)
+            resultats["continuite"] = V.verifier_continuite(d, veille_path, maillon_path)
 
             V.section("Résumé")
             for nom, statut in resultats.items():
@@ -106,6 +110,10 @@ def executer_verification(maillon_path, ots_path, veille_path):
             if bloquant:
                 print("\nCONCLUSION : ce maillon présente des incohérences. Ne pas s'y fier sans investigation.")
                 verdict = "echec"
+            elif resultats["ots"] is not True:
+                # Sans ancrage contrôlé, rien ne détecte un certificat modifié après son scellement.
+                print("\nCONCLUSION : aucune incohérence détectée, mais l'ancrage Bitcoin n'a pas été contrôlé.")
+                verdict = "partiel"
             else:
                 print("\nCONCLUSION : aucune incohérence détectée sur les éléments vérifiables.")
                 verdict = "ok"
@@ -141,6 +149,9 @@ PAGE_ACCUEIL = """
   button:hover { filter:brightness(1.08); }
   .steps { color:var(--muted); font-size:0.92rem; }
   .steps li { margin-bottom:6px; }
+  .panel p { color:var(--muted); font-size:0.92rem; }
+  .panel a { color:var(--accent); }
+  code { font-size:0.85rem; word-break:break-all; }
   footer { color:var(--muted); font-size:0.85rem; text-align:center; margin-top:40px; }
   footer a { color:var(--accent); }
 </style>
@@ -148,7 +159,7 @@ PAGE_ACCUEIL = """
 <body>
 <div class="wrap">
   <h1>Vérificateur ADN — Scelyans</h1>
-  <p class="tagline">Ne faites pas confiance. Vérifiez. Déposez un certificat ADN, obtenez le résultat immédiatement.</p>
+  <p class="tagline">Vérifiez un certificat ADN depuis votre navigateur, ou complètement sur votre ordinateur.</p>
 
   <div class="panel">
     <h2>Déposer un certificat</h2>
@@ -159,7 +170,7 @@ PAGE_ACCUEIL = """
 
       <label class="optional" for="ots">Fichier de preuve Bitcoin (.bitcoin.ots)</label>
       <input type="file" id="ots" name="ots" accept=".ots">
-      <p class="hint">La preuve la plus forte : ancrage indépendant dans la blockchain Bitcoin.</p>
+      <p class="hint">Sans ce fichier, cette page ne peut pas détecter un certificat modifié après son scellement.</p>
 
       <label class="optional" for="veille">Certificat de la veille (.json)</label>
       <input type="file" id="veille" name="veille" accept="application/json,.json">
@@ -170,14 +181,31 @@ PAGE_ACCUEIL = """
   </div>
 
   <div class="panel">
-    <h2>Ce que ce vérificateur contrôle</h2>
+    <h2>Ce que cette page contrôle</h2>
     <ul class="steps">
-      <li><strong>Structure</strong> — le fichier a bien la forme d'un vrai maillon ADN</li>
-      <li><strong>Gène bloc</strong> — le bloc Bitcoin cité existe réellement (recoupé auprès de deux sources publiques indépendantes)</li>
-      <li><strong>Ancrage OpenTimestamps</strong> — preuve cryptographique ancrée dans Bitcoin, la plus difficile à falsifier</li>
-      <li><strong>Gène code</strong> — le logiciel qui a produit ce certificat correspond au code source publié publiquement sur GitHub</li>
-      <li><strong>Continuité</strong> — ce jour s'enchaîne sans rupture avec le précédent</li>
+      <li><strong>Structure</strong> : le fichier a bien la forme d'un maillon ADN.</li>
+      <li><strong>Gène bloc</strong> : le bloc Bitcoin cité existe, confirmé par deux sources publiques.</li>
+      <li><strong>Ancrage OpenTimestamps</strong> : seulement si vous déposez le fichier <code>.bitcoin.ots</code>. C'est le contrôle qui prouve que le certificat n'a pas changé depuis son scellement.</li>
+      <li><strong>Gène code</strong> : les versions de <code>adn.py</code> et <code>archiveur.py</code> déclarées correspondent à des versions publiées sur GitHub. Le contrôle ne porte que sur ces deux programmes, pas sur le collecteur des données. Un écart est signalé en attention.</li>
+      <li><strong>Continuité</strong> : le certificat s'enchaîne avec celui de la veille, déposé par vous ou récupéré sur trackyzz.com.</li>
     </ul>
+  </div>
+
+  <div class="panel">
+    <h2>Ce que cette page ne contrôle pas</h2>
+    <p>Le gène tours, le gène bce et le recalcul de la racine à partir des feuilles. Elle ne relit pas non plus les relevés, qui ne sont pas publiés, et ne dit pas si un prix est juste.</p>
+  </div>
+
+  <div class="panel">
+    <h2>Version utilisée</h2>
+    <p>Empreinte SHA-256 du <code>verify.py</code> utilisé par cette page : <code>{{ empreinte }}</code>. Vous pouvez la comparer à celle du fichier publié sur GitHub.</p>
+  </div>
+
+  <div class="panel">
+    <h2>Vérification complète</h2>
+    <p>Téléchargez <a href="https://github.com/DavidJuice-prog/scelyans-archive/blob/main/archiveur/verify.py" target="_blank" rel="noopener">verify.py depuis GitHub</a> et le fichier des feuilles du jour depuis <a href="https://github.com/DavidJuice-prog/scelyans-feuilles-2026" target="_blank" rel="noopener">scelyans-feuilles-2026</a>. Placez-les dans le même dossier que le certificat et son fichier <code>.bitcoin.ots</code>, puis lancez sur votre ordinateur :</p>
+    <p><code>python verify.py adn-AAAA-MM-JJ.json --feuilles feuilles-AAAA-MM-JJ.txt.gz</code></p>
+    <p>Le contrôle de l'ancrage demande la bibliothèque Python <code>opentimestamps</code>.</p>
   </div>
 
   <footer>
@@ -205,7 +233,7 @@ PAGE_RESULTAT = """
   .verdict { padding:18px 20px; border-radius:12px; margin:20px 0; font-size:1.15rem; font-weight:700; }
   .verdict.ok { background:rgba(61,220,132,0.12); border:1px solid var(--ok); color:var(--ok); }
   .verdict.echec { background:rgba(255,90,90,0.12); border:1px solid var(--fail); color:var(--fail); }
-  .verdict.erreur { background:rgba(255,204,85,0.12); border:1px solid var(--warn); color:var(--warn); }
+  .verdict.erreur, .verdict.partiel { background:rgba(255,204,85,0.12); border:1px solid var(--warn); color:var(--warn); }
   pre { background:#0d1017; border:1px solid var(--border); border-radius:10px; padding:18px; overflow-x:auto; white-space:pre-wrap; word-break:break-word; font-size:0.92rem; }
   .ok { color:var(--ok); }
   .fail { color:var(--fail); }
@@ -217,6 +245,8 @@ PAGE_RESULTAT = """
   <p><a class="back" href="">&larr; Nouvelle vérification</a></p>
   {% if verdict == 'ok' %}
     <div class="verdict ok">Aucune incohérence détectée sur les éléments vérifiables.</div>
+  {% elif verdict == 'partiel' %}
+    <div class="verdict partiel">Aucune incohérence détectée, mais l'ancrage Bitcoin n'a pas été contrôlé : ajoutez le fichier .bitcoin.ots pour vérifier que ce certificat n'a pas été modifié.</div>
   {% elif verdict == 'echec' %}
     <div class="verdict echec">Ce certificat présente des incohérences. Ne pas s'y fier sans investigation.</div>
   {% else %}
@@ -232,7 +262,7 @@ PAGE_RESULTAT = """
 @app.route("/", methods=["GET", "POST"])
 def index():
     if request.method == "GET":
-        return render_template_string(PAGE_ACCUEIL)
+        return render_template_string(PAGE_ACCUEIL, empreinte=EMPREINTE_VERIFY)
     return verifier()
 
 
@@ -261,6 +291,9 @@ def verifier():
             veille_file.save(veille_path)
 
         sortie, verdict, erreur = executer_verification(maillon_path, ots_path, veille_path)
+
+    if veille_path:
+        sortie = sortie.replace(veille_path, "fichier fourni")  # jamais de chemin du serveur à l'écran
 
     if erreur:
         # Le détail technique (erreur) est déjà dans les logs serveur
