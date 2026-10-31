@@ -20,7 +20,7 @@ import contextlib
 import traceback
 import threading
 
-from flask import Flask, request, render_template_string
+from flask import Flask, request, render_template_string, send_file
 
 # Le vérificateur réutilise le fichier verify.py tel que publié publiquement
 # sur https://github.com/DavidJuice-prog/scelyans-archive (archiveur/verify.py).
@@ -38,6 +38,8 @@ import verify as V  # noqa: E402  (import après modification de sys.path, volon
 
 with open(V.__file__, "rb") as _f:
     EMPREINTE_VERIFY = hashlib.sha256(_f.read()).hexdigest()
+
+MENTIONS_LEGALES = os.path.normpath(os.path.join(_ICI, "..", "site", "mentions-legales.html"))
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5 Mo largement suffisant pour un maillon + .ots
@@ -211,6 +213,7 @@ PAGE_ACCUEIL = """
   <footer>
     Code source public et vérifiable :
     <a href="https://github.com/DavidJuice-prog/scelyans-archive" target="_blank" rel="noopener">github.com/DavidJuice-prog/scelyans-archive</a>
+    · <a href="mentions-legales">Mentions légales</a>
   </footer>
 </div>
 </body>
@@ -253,6 +256,7 @@ PAGE_RESULTAT = """
     <div class="verdict erreur">La vérification n'a pas pu aboutir (voir le détail ci-dessous).</div>
   {% endif %}
   <pre>{{ sortie_html|safe }}</pre>
+  <p><a class="back" href="mentions-legales">Mentions légales</a></p>
 </div>
 </body>
 </html>
@@ -264,6 +268,11 @@ def index():
     if request.method == "GET":
         return render_template_string(PAGE_ACCUEIL, empreinte=EMPREINTE_VERIFY)
     return verifier()
+
+
+@app.route("/mentions-legales")
+def mentions_legales():
+    return send_file(MENTIONS_LEGALES, mimetype="text/html")
 
 
 def verifier():
